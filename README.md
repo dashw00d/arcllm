@@ -30,6 +30,8 @@ python ./scripts/smoke_transformers_qwen.py
 arcllm start
 arcllm status
 arcllm chat "Say hello from Arc."
+arcllm set-model Qwen/Qwen3.5-27B
+arcllm set TORCH_DTYPE float16
 arcllm stop
 ```
 
@@ -52,6 +54,7 @@ OPENAI_API_KEY=local
 - User service file: `~/.config/systemd/user/arcllm.service`.
 - Config file: `~/.config/arcllm/config.env`.
 - Install script: `./scripts/install.sh`.
+- Shell completions are installed for zsh via `~/.config/shell/local.sh`.
 - `ENABLE_THINKING=false` is the default for the Qwen chat template.
 - `ZE_AFFINITY_MASK` defaults to `0` in `env.xpu.sh`.
 - Override `ZE_AFFINITY_MASK` or pass `--tensor-parallel-size` when you start testing multi-GPU layouts.

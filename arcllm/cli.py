@@ -31,6 +31,16 @@ DEFAULT_CONFIG = {
     "ENABLE_THINKING": "false",
 }
 
+KNOWN_CONFIG_KEYS = tuple(DEFAULT_CONFIG.keys())
+COMMON_MODELS = (
+    "Qwen/Qwen3-0.6B",
+    "Qwen/Qwen3-1.7B",
+    "Qwen/Qwen3-4B",
+    "Qwen/Qwen3-8B",
+    "Qwen/Qwen3.5-27B",
+    "Qwen/Qwen3.5-35B-A3B",
+)
+
 
 def ensure_dirs() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -61,6 +71,14 @@ def load_config() -> dict[str, str]:
         key, value = line.split("=", 1)
         config[key.strip()] = value.strip()
     return config
+
+
+def write_config(config: dict[str, str]) -> None:
+    ensure_dirs()
+    lines = [f"{key}={config[key]}\n" for key in KNOWN_CONFIG_KEYS if key in config]
+    extra_keys = sorted(key for key in config.keys() if key not in KNOWN_CONFIG_KEYS)
+    lines.extend(f"{key}={config[key]}\n" for key in extra_keys)
+    CONFIG_FILE.write_text("".join(lines))
 
 
 def write_service_file() -> None:
@@ -134,6 +152,18 @@ def config_env(config: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def service_active() -> bool:
+    result = run(["systemctl", "--user", "is-active", SERVICE_NAME],
+                 capture=True, check=False)
+    return (result.stdout or "").strip() == "active"
+
+
+def maybe_restart_service(restart: bool) -> None:
+    if restart and service_active():
+        run(["systemctl", "--user", "restart", SERVICE_NAME])
+        print(f"restarted {SERVICE_NAME}")
+
+
 def cmd_serve(_: argparse.Namespace) -> int:
     config = load_config()
     env = config_env(config)
@@ -169,9 +199,7 @@ def cmd_restart(_: argparse.Namespace) -> int:
 
 def cmd_status(_: argparse.Namespace) -> int:
     config = load_config()
-    result = run(["systemctl", "--user", "is-active", SERVICE_NAME],
-                 capture=True, check=False)
-    active = result.stdout.strip() if result.stdout else "inactive"
+    active = "active" if service_active() else "inactive"
     print(f"service={active}")
     if active == "active":
         print(json.dumps(api_request(config, "GET", "/healthz"), indent=2))
@@ -231,6 +259,39 @@ def cmd_config(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_set(args: argparse.Namespace) -> int:
+    config = load_config()
+    key = args.key.upper()
+    if key not in KNOWN_CONFIG_KEYS:
+        raise SystemExit(
+            f"unknown config key: {args.key}. valid keys: {', '.join(KNOWN_CONFIG_KEYS)}"
+        )
+    config[key] = args.value
+    write_config(config)
+    print(f"{key}={args.value}")
+    maybe_restart_service(not args.no_restart)
+    return 0
+
+
+def cmd_set_model(args: argparse.Namespace) -> int:
+    config = load_config()
+    config["MODEL_ID"] = args.model
+    write_config(config)
+    print(f"MODEL_ID={args.model}")
+    maybe_restart_service(not args.no_restart)
+    return 0
+
+
+def cmd_completions(args: argparse.Namespace) -> int:
+    if args.shell == "zsh":
+        print((ROOT / "completions" / "_arcllm").read_text(), end="")
+        return 0
+    if args.shell == "bash":
+        print((ROOT / "completions" / "arcllm.bash").read_text(), end="")
+        return 0
+    raise SystemExit(f"unsupported shell: {args.shell}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="arcllm")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -274,6 +335,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     config_cmd = subparsers.add_parser("config")
     config_cmd.set_defaults(func=cmd_config)
+
+    set_cmd = subparsers.add_parser("set")
+    set_cmd.add_argument("key")
+    set_cmd.add_argument("value")
+    set_cmd.add_argument("--no-restart", action="store_true")
+    set_cmd.set_defaults(func=cmd_set)
+
+    set_model_cmd = subparsers.add_parser("set-model")
+    set_model_cmd.add_argument("model")
+    set_model_cmd.add_argument("--no-restart", action="store_true")
+    set_model_cmd.set_defaults(func=cmd_set_model)
+
+    completions_cmd = subparsers.add_parser("completions")
+    completions_cmd.add_argument("shell", choices=["bash", "zsh"])
+    completions_cmd.set_defaults(func=cmd_completions)
 
     return parser
 
