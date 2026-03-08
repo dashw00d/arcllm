@@ -48,6 +48,29 @@ OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 OPENAI_API_KEY=local
 ```
 
+OpenAI Responses API is available at the same base URL:
+
+```bash
+curl http://127.0.0.1:8000/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": "Reply with exactly: responses ready"
+  }'
+```
+
+Responses streaming emits OpenAI-style SSE events:
+
+```bash
+curl -N http://127.0.0.1:8000/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "input": "Say hello from responses.",
+    "stream": true
+  }'
+```
+
 Streaming chat works through the router:
 
 ```bash
@@ -121,6 +144,22 @@ Follow-up turns should send the assistant `tool_calls` plus a `tool` role messag
 }
 ```
 
+The Responses API also supports the same loop with `previous_response_id` and `function_call_output`:
+
+```json
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "previous_response_id": "resp_...",
+  "input": [
+    {
+      "type": "function_call_output",
+      "call_id": "call_...",
+      "output": "{\"location\":\"Chicago\",\"temperature_f\":45,\"condition\":\"Cloudy\"}"
+    }
+  ]
+}
+```
+
 ## Notes
 
 - The global command is `arcllm` and is installed at `~/.local/bin/arcllm`.
@@ -130,8 +169,10 @@ Follow-up turns should send the assistant `tool_calls` plus a `tool` role messag
 - Shell completions are installed for zsh via `~/.config/shell/local.sh`.
 - `ENABLE_THINKING=false` is the default for the Qwen chat template.
 - The router and workers support OpenAI-style `stream: true` SSE responses.
+- The router exposes `/v1/responses` with `input`, `instructions`, `previous_response_id`, streaming text deltas, and tool-call round trips.
 - The chat endpoint supports `tools`, `tool_choice`, assistant `tool_calls`, and `tool` role follow-up messages.
 - Conversation persistence is client-managed; agent frameworks should send full message history each turn.
+- `/v1/responses` keeps an in-memory response store for `previous_response_id` and `GET /v1/responses/{id}`.
 - `ZE_AFFINITY_MASK` defaults to `0` in `env.xpu.sh`.
 - Override `ZE_AFFINITY_MASK` or pass `--tensor-parallel-size` when you start testing multi-GPU layouts.
 - The current Python environment lives in `.venv`.
