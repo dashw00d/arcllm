@@ -62,6 +62,65 @@ curl -N http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
+Tool calling is OpenAI-style on `/v1/chat/completions`:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "tool_choice": "required",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get current weather for a city",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {"type": "string"}
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ],
+    "messages": [
+      {"role": "user", "content": "What is the weather in Chicago?"}
+    ]
+  }'
+```
+
+Follow-up turns should send the assistant `tool_calls` plus a `tool` role message with the tool result:
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "What is the weather in Chicago?"},
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_123",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"location\":\"Chicago\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_123",
+      "content": "{\"location\":\"Chicago\",\"temperature_f\":45,\"condition\":\"Cloudy\"}"
+    }
+  ]
+}
+```
+
 ## Notes
 
 - The global command is `arcllm` and is installed at `~/.local/bin/arcllm`.
@@ -71,7 +130,8 @@ curl -N http://127.0.0.1:8000/v1/chat/completions \
 - Shell completions are installed for zsh via `~/.config/shell/local.sh`.
 - `ENABLE_THINKING=false` is the default for the Qwen chat template.
 - The router and workers support OpenAI-style `stream: true` SSE responses.
-- Conversation persistence is currently client-managed; agent frameworks should send full message history each turn.
+- The chat endpoint supports `tools`, `tool_choice`, assistant `tool_calls`, and `tool` role follow-up messages.
+- Conversation persistence is client-managed; agent frameworks should send full message history each turn.
 - `ZE_AFFINITY_MASK` defaults to `0` in `env.xpu.sh`.
 - Override `ZE_AFFINITY_MASK` or pass `--tensor-parallel-size` when you start testing multi-GPU layouts.
 - The current Python environment lives in `.venv`.
