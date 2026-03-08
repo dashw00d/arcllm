@@ -29,6 +29,8 @@ _arcllm() {
     WORKER_PORTS
     DEFAULT_MAX_NEW_TOKENS
     ENABLE_THINKING
+    MAX_CONCURRENT_REQUESTS
+    MAX_QUEUE_DEPTH
   )
 
   local -a models
@@ -63,6 +65,8 @@ _arcllm() {
             MODEL_ID) _describe -t models 'models' models ;;
             TORCH_DTYPE) _values 'dtype' float16 bfloat16 float32 ;;
             ENABLE_THINKING) _values 'thinking' true false ;;
+            MAX_CONCURRENT_REQUESTS) _message 'max concurrent requests' ;;
+            MAX_QUEUE_DEPTH) _message 'max queued requests' ;;
           esac
           ;;
       esac

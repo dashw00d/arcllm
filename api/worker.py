@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -21,13 +22,90 @@ DTYPE = getattr(torch, os.getenv("TORCH_DTYPE", "float16"))
 DEVICE = os.getenv("MODEL_DEVICE", "xpu")
 DEFAULT_MAX_NEW_TOKENS = int(os.getenv("DEFAULT_MAX_NEW_TOKENS", "256"))
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").lower() == "true"
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "1"))
+MAX_QUEUE_DEPTH = int(os.getenv("MAX_QUEUE_DEPTH", "2"))
 THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 
 app = FastAPI(title="Arc Worker", version="0.2.0")
 tokenizer = None
 model = None
-generation_lock = threading.Lock()
+
+
+class WorkerOverloadedError(RuntimeError):
+    pass
+
+
+class RequestLimiter:
+    def __init__(self, max_concurrent: int, max_queue_depth: int) -> None:
+        self.max_concurrent = max(1, max_concurrent)
+        self.max_queue_depth = max(0, max_queue_depth)
+        self.condition = threading.Condition()
+        self.active = 0
+        self.waiting = 0
+
+    def acquire(self) -> None:
+        with self.condition:
+            if self.active >= self.max_concurrent and self.waiting >= self.max_queue_depth:
+                raise WorkerOverloadedError("worker queue is full")
+            self.waiting += 1
+            try:
+                while self.active >= self.max_concurrent:
+                    self.condition.wait()
+                self.active += 1
+            finally:
+                self.waiting -= 1
+
+    def release(self) -> None:
+        with self.condition:
+            self.active -= 1
+            self.condition.notify()
+
+    def snapshot(self) -> dict[str, int]:
+        with self.condition:
+            return {
+                "active": self.active,
+                "waiting": self.waiting,
+                "max_concurrent": self.max_concurrent,
+                "max_queue_depth": self.max_queue_depth,
+                "available_slots": max(0, self.max_concurrent - self.active),
+            }
+
+
+request_limiter = RequestLimiter(MAX_CONCURRENT_REQUESTS, MAX_QUEUE_DEPTH)
+
+
+@contextmanager
+def generation_slot() -> Iterator[None]:
+    try:
+        request_limiter.acquire()
+    except WorkerOverloadedError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "worker_queue_full",
+                "message": str(exc),
+                "queue": request_limiter.snapshot(),
+            },
+        ) from exc
+    try:
+        yield
+    finally:
+        request_limiter.release()
+
+
+def acquire_generation_slot() -> None:
+    try:
+        request_limiter.acquire()
+    except WorkerOverloadedError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "worker_queue_full",
+                "message": str(exc),
+                "queue": request_limiter.snapshot(),
+            },
+        ) from exc
 
 
 class Message(BaseModel):
@@ -279,7 +357,7 @@ def generate_text(
     inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
     generate_kwargs = build_generation_kwargs(inputs, max_tokens, temperature, top_p, seed)
 
-    with generation_lock:
+    with generation_slot():
         with torch.no_grad():
             outputs = model.generate(**generate_kwargs)
 
@@ -310,6 +388,7 @@ def start_generation_stream(
         skip_prompt=True,
         skip_special_tokens=True,
     )
+    acquire_generation_slot()
     generate_kwargs = build_generation_kwargs(
         inputs,
         max_tokens,
@@ -320,9 +399,11 @@ def start_generation_stream(
     )
 
     def run_generation() -> None:
-        with generation_lock:
+        try:
             with torch.no_grad():
                 model.generate(**generate_kwargs)
+        finally:
+            request_limiter.release()
 
     thread = threading.Thread(target=run_generation, daemon=True)
     thread.start()
@@ -584,10 +665,15 @@ def startup() -> None:
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
+def healthz() -> dict[str, Any]:
     if model is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="model not loaded")
-    return {"status": "ok", "model": MODEL_ID, "device": DEVICE}
+    return {
+        "status": "ok",
+        "model": MODEL_ID,
+        "device": DEVICE,
+        "queue": request_limiter.snapshot(),
+    }
 
 
 @app.get("/v1/models")

@@ -32,6 +32,7 @@ arcllm status
 arcllm chat "Say hello from Arc."
 arcllm set-model Qwen/Qwen3.5-27B
 arcllm set TORCH_DTYPE float16
+arcllm set MAX_QUEUE_DEPTH 2
 arcllm stop
 ```
 
@@ -174,6 +175,8 @@ The Responses API also supports the same loop with `previous_response_id` and `f
 - Conversation persistence is client-managed; agent frameworks should send full message history each turn.
 - `/v1/responses` persists response history for `previous_response_id` and `GET /v1/responses/{id}` in `runtime/responses.jsonl`.
 - Override the response-store location with `ARCLLM_RESPONSE_STORE_PATH` if you want it somewhere else.
+- Worker concurrency defaults to `MAX_CONCURRENT_REQUESTS=1` and `MAX_QUEUE_DEPTH=2` per GPU worker.
+- Set `MAX_QUEUE_DEPTH=0` for fail-fast behavior; the router will retry other workers before returning a structured 429.
 - `ZE_AFFINITY_MASK` defaults to `0` in `env.xpu.sh`.
 - Override `ZE_AFFINITY_MASK` or pass `--tensor-parallel-size` when you start testing multi-GPU layouts.
 - The current Python environment lives in `.venv`.

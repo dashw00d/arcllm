@@ -36,6 +36,7 @@ worker_lock = asyncio.Lock()
 response_store: dict[str, dict[str, Any]] = {}
 response_lock = asyncio.Lock()
 client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+RETRYABLE_STATUS_CODES = {429, 503}
 
 
 def ensure_runtime_dirs() -> None:
@@ -83,47 +84,98 @@ def append_response_record(
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-async def next_worker() -> str:
+async def next_worker_order() -> list[str]:
     async with worker_lock:
         if not workers:
             raise HTTPException(status_code=503, detail="no workers configured")
         workers.rotate(-1)
-        return workers[-1]
+        return [workers[-1], *list(workers)[:-1]]
+
+
+def response_json(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except json.JSONDecodeError:
+        return {"detail": response.text}
+
+
+def capacity_error(errors: list[dict[str, Any]]) -> HTTPException:
+    status_code = 429 if any(error.get("status_code") == 429 for error in errors) else 502
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "error": "no_available_workers",
+            "message": "all workers are busy or unavailable",
+            "workers": errors,
+        },
+    )
 
 
 async def proxy_json(path: str, request: Request, body: Any) -> JSONResponse:
-    worker = await next_worker()
-    try:
-        response = await client.request(
-            request.method,
-            f"{worker}{path}",
-            params=request.query_params,
-            json=body,
-        )
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return JSONResponse(status_code=response.status_code, content=response.json())
+    errors: list[dict[str, Any]] = []
+    for worker in await next_worker_order():
+        try:
+            response = await client.request(
+                request.method,
+                f"{worker}{path}",
+                params=request.query_params,
+                json=body,
+            )
+        except httpx.HTTPError as exc:
+            errors.append({"worker": worker, "error": str(exc), "status_code": 502})
+            continue
+        if response.status_code in RETRYABLE_STATUS_CODES:
+            errors.append(
+                {
+                    "worker": worker,
+                    "status_code": response.status_code,
+                    "detail": response_json(response),
+                }
+            )
+            continue
+        return JSONResponse(status_code=response.status_code, content=response_json(response))
+    raise capacity_error(errors)
 
 
 async def proxy_stream(path: str, request: Request, body: Any) -> StreamingResponse:
-    worker = await next_worker()
     headers = {}
     if request.headers.get("content-type"):
         headers["content-type"] = request.headers["content-type"]
 
-    try:
-        upstream = await client.send(
-            client.build_request(
-                request.method,
-                f"{worker}{path}",
-                params=request.query_params,
-                content=json.dumps(body).encode("utf-8"),
-                headers=headers,
-            ),
-            stream=True,
-        )
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    errors: list[dict[str, Any]] = []
+    upstream = None
+    for worker in await next_worker_order():
+        try:
+            candidate = await client.send(
+                client.build_request(
+                    request.method,
+                    f"{worker}{path}",
+                    params=request.query_params,
+                    content=json.dumps(body).encode("utf-8"),
+                    headers=headers,
+                ),
+                stream=True,
+            )
+        except httpx.HTTPError as exc:
+            errors.append({"worker": worker, "error": str(exc), "status_code": 502})
+            continue
+        if candidate.status_code in RETRYABLE_STATUS_CODES:
+            try:
+                detail = response_json(candidate)
+            finally:
+                await candidate.aclose()
+            errors.append(
+                {
+                    "worker": worker,
+                    "status_code": candidate.status_code,
+                    "detail": detail,
+                }
+            )
+            continue
+        upstream = candidate
+        break
+    if upstream is None:
+        raise capacity_error(errors)
 
     async def iter_bytes() -> AsyncIterator[bytes]:
         try:
@@ -392,11 +444,27 @@ def build_conversation_with_assistant(
 async def create_response_json(body: dict[str, Any]) -> JSONResponse:
     messages = await build_responses_messages(body)
     chat_request = build_chat_request(body, messages, stream=False)
-    worker = await next_worker()
-    try:
-        upstream = await client.post(f"{worker}/v1/chat/completions", json=chat_request)
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    errors: list[dict[str, Any]] = []
+    upstream = None
+    for worker in await next_worker_order():
+        try:
+            candidate = await client.post(f"{worker}/v1/chat/completions", json=chat_request)
+        except httpx.HTTPError as exc:
+            errors.append({"worker": worker, "error": str(exc), "status_code": 502})
+            continue
+        if candidate.status_code in RETRYABLE_STATUS_CODES:
+            errors.append(
+                {
+                    "worker": worker,
+                    "status_code": candidate.status_code,
+                    "detail": response_json(candidate),
+                }
+            )
+            continue
+        upstream = candidate
+        break
+    if upstream is None:
+        raise capacity_error(errors)
 
     payload = upstream.json()
     if upstream.status_code >= 400:
@@ -436,14 +504,34 @@ async def iter_sse_events(upstream: httpx.Response) -> AsyncIterator[dict[str, A
 async def create_response_stream(body: dict[str, Any]) -> StreamingResponse | JSONResponse:
     messages = await build_responses_messages(body)
     chat_request = build_chat_request(body, messages, stream=True)
-    worker = await next_worker()
-    try:
-        upstream = await client.send(
-            client.build_request("POST", f"{worker}/v1/chat/completions", json=chat_request),
-            stream=True,
-        )
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    errors: list[dict[str, Any]] = []
+    upstream = None
+    for worker in await next_worker_order():
+        try:
+            candidate = await client.send(
+                client.build_request("POST", f"{worker}/v1/chat/completions", json=chat_request),
+                stream=True,
+            )
+        except httpx.HTTPError as exc:
+            errors.append({"worker": worker, "error": str(exc), "status_code": 502})
+            continue
+        if candidate.status_code in RETRYABLE_STATUS_CODES:
+            try:
+                detail = response_json(candidate)
+            finally:
+                await candidate.aclose()
+            errors.append(
+                {
+                    "worker": worker,
+                    "status_code": candidate.status_code,
+                    "detail": detail,
+                }
+            )
+            continue
+        upstream = candidate
+        break
+    if upstream is None:
+        raise capacity_error(errors)
 
     if upstream.status_code >= 400:
         try:
