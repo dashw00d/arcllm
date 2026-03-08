@@ -48,6 +48,20 @@ OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 OPENAI_API_KEY=local
 ```
 
+Streaming chat works through the router:
+
+```bash
+curl -N http://127.0.0.1:8000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "stream": true,
+    "messages": [
+      {"role": "user", "content": "Say hello from Arc in one sentence."}
+    ]
+  }'
+```
+
 ## Notes
 
 - The global command is `arcllm` and is installed at `~/.local/bin/arcllm`.
@@ -56,6 +70,8 @@ OPENAI_API_KEY=local
 - Install script: `./scripts/install.sh`.
 - Shell completions are installed for zsh via `~/.config/shell/local.sh`.
 - `ENABLE_THINKING=false` is the default for the Qwen chat template.
+- The router and workers support OpenAI-style `stream: true` SSE responses.
+- Conversation persistence is currently client-managed; agent frameworks should send full message history each turn.
 - `ZE_AFFINITY_MASK` defaults to `0` in `env.xpu.sh`.
 - Override `ZE_AFFINITY_MASK` or pass `--tensor-parallel-size` when you start testing multi-GPU layouts.
 - The current Python environment lives in `.venv`.

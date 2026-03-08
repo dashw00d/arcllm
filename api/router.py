@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 
 import asyncio
+import json
 import os
 from collections import deque
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 
 WORKER_URLS = [
@@ -33,18 +34,52 @@ async def next_worker() -> str:
         return workers[-1]
 
 
-async def proxy_json(path: str, request: Request) -> JSONResponse:
+async def proxy_json(path: str, request: Request, body: Any) -> JSONResponse:
     worker = await next_worker()
     try:
         response = await client.request(
             request.method,
             f"{worker}{path}",
             params=request.query_params,
-            json=await request.json(),
+            json=body,
         )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return JSONResponse(status_code=response.status_code, content=response.json())
+
+
+async def proxy_stream(path: str, request: Request, body: Any) -> StreamingResponse:
+    worker = await next_worker()
+    headers = {}
+    if request.headers.get("content-type"):
+        headers["content-type"] = request.headers["content-type"]
+
+    try:
+        upstream = await client.send(
+            client.build_request(
+                request.method,
+                f"{worker}{path}",
+                params=request.query_params,
+                content=json.dumps(body).encode("utf-8"),
+                headers=headers,
+            ),
+            stream=True,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    async def iter_bytes():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(
+        iter_bytes(),
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type", "text/event-stream"),
+    )
 
 
 @app.get("/healthz")
@@ -67,11 +102,17 @@ async def models() -> JSONResponse:
     return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(request: Request) -> JSONResponse:
-    return await proxy_json("/v1/chat/completions", request)
+@app.post("/v1/chat/completions", response_model=None)
+async def chat_completions(request: Request) -> Any:
+    body = json.loads(await request.body())
+    if body.get("stream"):
+        return await proxy_stream("/v1/chat/completions", request, body)
+    return await proxy_json("/v1/chat/completions", request, body)
 
 
-@app.post("/v1/completions")
-async def completions(request: Request) -> JSONResponse:
-    return await proxy_json("/v1/completions", request)
+@app.post("/v1/completions", response_model=None)
+async def completions(request: Request) -> Any:
+    body = json.loads(await request.body())
+    if body.get("stream"):
+        return await proxy_stream("/v1/completions", request, body)
+    return await proxy_json("/v1/completions", request, body)
