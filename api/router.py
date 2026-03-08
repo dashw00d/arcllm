@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+from pathlib import Path
 from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
@@ -23,6 +24,11 @@ WORKER_URLS = [
     ).split(",")
     if url.strip()
 ]
+ROOT = Path(os.getenv("LLM_STACK_ROOT", Path(__file__).resolve().parent.parent))
+RUNTIME_DIR = Path(os.getenv("ARCLLM_RUNTIME_DIR", ROOT / "runtime"))
+RESPONSE_STORE_PATH = Path(
+    os.getenv("ARCLLM_RESPONSE_STORE_PATH", RUNTIME_DIR / "responses.jsonl")
+)
 
 app = FastAPI(title="Arc Router", version="0.2.0")
 workers = deque(WORKER_URLS)
@@ -30,6 +36,51 @@ worker_lock = asyncio.Lock()
 response_store: dict[str, dict[str, Any]] = {}
 response_lock = asyncio.Lock()
 client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+
+
+def ensure_runtime_dirs() -> None:
+    RESPONSE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def load_response_store_from_disk() -> None:
+    ensure_runtime_dirs()
+    response_store.clear()
+    if not RESPONSE_STORE_PATH.exists():
+        return
+
+    with RESPONSE_STORE_PATH.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            response_id = record.get("response_id")
+            response = record.get("response")
+            conversation = record.get("conversation")
+            if not response_id or not isinstance(response, dict) or not isinstance(conversation, list):
+                continue
+            response_store[response_id] = {
+                "response": response,
+                "conversation": conversation,
+            }
+
+
+def append_response_record(
+    response_id: str,
+    response: dict[str, Any],
+    conversation: list[dict[str, Any]],
+) -> None:
+    ensure_runtime_dirs()
+    record = {
+        "response_id": response_id,
+        "response": response,
+        "conversation": conversation,
+    }
+    with RESPONSE_STORE_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 async def next_worker() -> str:
@@ -194,10 +245,13 @@ async def store_response(
     conversation: list[dict[str, Any]],
 ) -> None:
     async with response_lock:
+        response_copy = copy.deepcopy(response)
+        conversation_copy = copy.deepcopy(conversation)
         response_store[response_id] = {
-            "response": copy.deepcopy(response),
-            "conversation": copy.deepcopy(conversation),
+            "response": response_copy,
+            "conversation": conversation_copy,
         }
+        append_response_record(response_id, response_copy, conversation_copy)
 
 
 async def load_stored_response(response_id: str) -> dict[str, Any]:
@@ -206,6 +260,12 @@ async def load_stored_response(response_id: str) -> dict[str, Any]:
     if record is None:
         raise HTTPException(status_code=404, detail=f"unknown response id: {response_id}")
     return copy.deepcopy(record)
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    async with response_lock:
+        load_response_store_from_disk()
 
 
 async def build_responses_messages(body: dict[str, Any]) -> list[dict[str, Any]]:

@@ -172,7 +172,8 @@ The Responses API also supports the same loop with `previous_response_id` and `f
 - The router exposes `/v1/responses` with `input`, `instructions`, `previous_response_id`, streaming text deltas, and tool-call round trips.
 - The chat endpoint supports `tools`, `tool_choice`, assistant `tool_calls`, and `tool` role follow-up messages.
 - Conversation persistence is client-managed; agent frameworks should send full message history each turn.
-- `/v1/responses` keeps an in-memory response store for `previous_response_id` and `GET /v1/responses/{id}`.
+- `/v1/responses` persists response history for `previous_response_id` and `GET /v1/responses/{id}` in `runtime/responses.jsonl`.
+- Override the response-store location with `ARCLLM_RESPONSE_STORE_PATH` if you want it somewhere else.
 - `ZE_AFFINITY_MASK` defaults to `0` in `env.xpu.sh`.
 - Override `ZE_AFFINITY_MASK` or pass `--tensor-parallel-size` when you start testing multi-GPU layouts.
 - The current Python environment lives in `.venv`.
