@@ -1,0 +1,7 @@
+{
+  "uuid": "triple-temps@ryan",
+  "name": "Triple Temps",
+  "description": "Shows CPU and Intel Arc GPU temperatures in the top bar.",
+  "shell-version": ["46"],
+  "version": 1
+}
