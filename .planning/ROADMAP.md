@@ -38,7 +38,9 @@ Plans:
   1. GLM-4.7-Flash Q4_K_M generates 500+ tokens at 2048 context on 3x A770 without desync or crash
   2. Host stall counter reports ~3 waits per token (one per device at Phase 2 barrier), not ~4000
   3. The stall count is visible in bench output when `GGML_SYCL_ROW_EVENTS=1` is set
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 02-01-PLAN.md — Add stall counter instrumentation (SYNC-03), run GLM 500-token correctness bench (CORR-01/CORR-02)
 
 ### Phase 3: Complete Event Path
 **Goal**: The last blocking stall site is eliminated — Phase 3 merge uses event-based chains, src1 cache propagates completion events, and throughput is characterized
@@ -59,5 +61,5 @@ Phases execute in numeric order: 1 → 2 → 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Harden Infrastructure | 1/1 | Complete    | 2026-03-18 |
-| 2. Validate Existing Event Path | 0/? | Not started | - |
+| 2. Validate Existing Event Path | 0/1 | In progress | - |
 | 3. Complete Event Path | 0/? | Not started | - |
