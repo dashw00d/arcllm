@@ -13,7 +13,7 @@ Phases 1-2 validate and harden the existing OOO queue + event chain infrastructu
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Harden Infrastructure** - Assert correct OOO queue context and enforce immediate command list requirement in code (Plan 01-01 complete)
-- [ ] **Phase 2: Validate Existing Event Path** - Confirm Phase 1-2 of the dispatch loop is correct before adding Phase 3 work
+- [x] **Phase 2: Validate Existing Event Path** - Confirm Phase 1-2 of the dispatch loop is correct before adding Phase 3 work (completed 2026-03-18)
 - [ ] **Phase 3: Complete Event Path** - Convert Phase 3 merge to event-based chains, propagate events through src1 cache, characterize throughput
 
 ## Phase Details
@@ -38,7 +38,7 @@ Plans:
   1. GLM-4.7-Flash Q4_K_M generates 500+ tokens at 2048 context on 3x A770 without desync or crash
   2. Host stall counter reports ~3 waits per token (one per device at Phase 2 barrier), not ~4000
   3. The stall count is visible in bench output when `GGML_SYCL_ROW_EVENTS=1` is set
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 Plans:
 - [ ] 02-01-PLAN.md — Add stall counter instrumentation (SYNC-03), run GLM 500-token correctness bench (CORR-01/CORR-02)
 
@@ -61,5 +61,5 @@ Phases execute in numeric order: 1 → 2 → 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Harden Infrastructure | 1/1 | Complete    | 2026-03-18 |
-| 2. Validate Existing Event Path | 0/1 | In progress | - |
+| 2. Validate Existing Event Path | 0/1 | Complete    | 2026-03-18 |
 | 3. Complete Event Path | 0/? | Not started | - |
