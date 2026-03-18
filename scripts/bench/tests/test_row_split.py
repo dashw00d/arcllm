@@ -85,6 +85,7 @@ bug as layer-split, row-split only fixes non-main device overlap).
 | MMVQ + staged + cache | PASS | 0.6 t/s | +20% vs 3-phase, no malloc |
 | MMVQ + worker threads | PASS | 0.4 t/s | SLOWER — src queue contention |
 | Layer-split baseline | PASS | 17.5 t/s | np=16, SYNC_EVERY=3 |
+| MMVQ + event merge (Phase 3) | TBD | TBD | SYNC-01/02 |
 
 ### 8. OOO Queue + Event-Based Sync (2026-03-17)
 CUDA-style event sync: OOO queues + ext_oneapi_submit_barrier + handler-based
@@ -298,6 +299,58 @@ class TestRowSplit(BenchTest):
 
         print(f"  CORR-01: PASS — {result.total_tokens} tokens, {result.total_tps:.1f} t/s")
         print(f"  CORR-02: PASS — avg stalls/token: {avg_stalls:.1f}, max: {max_stalls} "
+              f"(from {len(counts)} samples)")
+
+    def test_events_merge_glm47_np1_500tok(self):
+        """GLM-4.7-Flash Q4_K_M row-split 500 tokens — SYNC-01/SYNC-02 acceptance gate.
+
+        Phase 3 validation: confirms event-based merge (depends_on chaining in
+        Phase 3 of the dispatch loop) and src1 cache event propagation produce
+        correct output at sustained generation length on GLM-4.7-Flash MoE.
+
+        PASS criteria:
+        - completed == 1, total_tokens >= 500 (correctness)
+        - stall count per token <= 10 in server log (sync efficiency)
+        - throughput measured and printed
+
+        Requires: GGML_SYCL_ROW_EVENTS=1, IMMEDIATE_CMDLISTS=1, ROW_ALLOW_MMVQ=1.
+        Timeout 900s covers worst-case 0.6 t/s throughput.
+
+        ## Results
+        [To be updated after hardware run]
+        """
+        cfg = ROW_EVENTS.with_(
+            model="glm47-q4km", timeout=900,
+            name="rowsplit_events_merge_glm47_np1_500tok",
+            prompt=THINK_PROMPT,
+            n_parallel=1, concurrent=1, context=2048,
+            flash_attn=True,
+            max_tokens=500)
+        result = self.run(cfg)
+
+        # Correctness: generation completed without crash
+        assert not result.error, (
+            f"SYNC-01 FAIL: server error during 500-token generation: {result.error}")
+        assert result.completed == 1, (
+            f"SYNC-01 FAIL: expected 1 completed request, got {result.completed}")
+        assert result.total_tokens >= 500, (
+            f"SYNC-01 FAIL: expected >= 500 tokens, got {result.total_tokens}")
+
+        # Stall count from server log
+        log_path = LOG_DIR / "rowsplit_events_merge_glm47_np1_500tok.log"
+        log_text = log_path.read_text() if log_path.exists() else ""
+        stall_lines = [l for l in log_text.splitlines() if "[EV] stalls/token:" in l]
+        assert len(stall_lines) > 0, (
+            f"SYNC-02 FAIL: no '[EV] stalls/token:' lines in server log. "
+            f"Is SYNC-03 stall counter built into llama-server?")
+        counts = [int(re.search(r"stalls/token: (\d+)", l).group(1)) for l in stall_lines]
+        max_stalls = max(counts)
+        avg_stalls = sum(counts) / len(counts)
+        assert max_stalls <= 10, (
+            f"SYNC-02 FAIL: max stalls/token = {max_stalls} (expected <= 10, got {counts[:10]}...)")
+
+        print(f"  SYNC-01: PASS -- {result.total_tokens} tokens, {result.total_tps:.1f} t/s")
+        print(f"  SYNC-02: PASS -- avg stalls/token: {avg_stalls:.1f}, max: {max_stalls} "
               f"(from {len(counts)} samples)")
 
     # ══ Phase 3: Complete event path (SYNC-01 + SYNC-02) ══════════
