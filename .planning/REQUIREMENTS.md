@@ -16,12 +16,12 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **SYNC-01**: Phase 3 merge copies use `handler::depends_on(kernel_completion_event)` instead of blocking `dev2dev_memcpy_staged_sync`
 - [ ] **SYNC-02**: src1 copy cache stores last copy completion event per device and returns it to downstream matmuls via `depends_on()`
-- [ ] **SYNC-03**: Host stall counter instruments `queue.wait()` calls and reports count per token when `GGML_SYCL_ROW_EVENTS=1`
+- [x] **SYNC-03**: Host stall counter instruments `queue.wait()` calls and reports count per token when `GGML_SYCL_ROW_EVENTS=1`
 
 ### Correctness
 
-- [ ] **CORR-01**: GLM-4.7-Flash Q4_K_M generates 500+ tokens at 2048 context on 3x A770 without desync or crash
-- [ ] **CORR-02**: Host stall count per token is ~3 (one per device at Phase 2), not ~4000
+- [x] **CORR-01**: GLM-4.7-Flash Q4_K_M generates 500+ tokens at 2048 context on 3x A770 without desync or crash
+- [x] **CORR-02**: Host stall count per token is ~3 (one per device at Phase 2), not ~4000
 
 ## v2 Requirements
 
@@ -58,9 +58,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | INFRA-01 | Phase 1 | Complete (2026-03-18) |
 | INFRA-02 | Phase 1 | Complete (2026-03-18) |
-| SYNC-03 | Phase 2 | Pending |
-| CORR-01 | Phase 2 | Pending |
-| CORR-02 | Phase 2 | Pending |
+| SYNC-03 | Phase 2 | Complete |
+| CORR-01 | Phase 2 | Complete |
+| CORR-02 | Phase 2 | Complete |
 | SYNC-01 | Phase 3 | Pending |
 | SYNC-02 | Phase 3 | Pending |
 

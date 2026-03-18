@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-harden-infrastructure/01-01-PLAN.md
-last_updated: "2026-03-18T03:26:35.573Z"
+stopped_at: Completed 02-validate-existing-event-path/02-01-PLAN.md
+last_updated: "2026-03-18T03:55:13.871Z"
 last_activity: 2026-03-18 — Plan 01-01 (startup assertions) complete
 progress:
   total_phases: 3
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  completed_phases: 2
+  total_plans: 2
+  completed_plans: 2
   percent: 10
 ---
 
@@ -50,6 +50,7 @@ Progress: [█░░░░░░░░░] 10%
 - Trend: -
 
 *Updated after each plan completion*
+| Phase 02-validate-existing-event-path P01 | 4min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -64,6 +65,9 @@ Recent decisions affecting current work:
 - [01-01]: INFRA-01 placed in ggml_check_sycl() (not ooo_stream()) — fires before model loading, sub-5s abort
 - [01-01]: INFRA-02 placed in ooo_stream() lazy-init — fires before first matmul without needing backend context in init
 - [01-01]: g_ggml_sycl_row_events extern declaration added to common.hpp for INFRA-02 check
+- [Phase 02-validate-existing-event-path]: Count ctx.stream()->wait() AND dev_events[i].wait() in stall counter; exclude ooo_stream flush (pool management, not inference stall)
+- [Phase 02-validate-existing-event-path]: Use ne11==1 for decode token boundary in stall counter; use thread_local for g_stall_count (safe for future parallel decode)
+- [Phase 02-validate-existing-event-path]: CORR-02 bench bound max<=10 stalls/token (generous); expected ~4 on 3x A770 (1 pre-sync + 3 Phase 2 event waits)
 
 ### Pending Todos
 
@@ -76,6 +80,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-18T03:20:20Z
-Stopped at: Completed 01-harden-infrastructure/01-01-PLAN.md
-Resume file: .planning/phases/01-harden-infrastructure/01-01-SUMMARY.md
+Last session: 2026-03-18T03:55:13.868Z
+Stopped at: Completed 02-validate-existing-event-path/02-01-PLAN.md
+Resume file: None
