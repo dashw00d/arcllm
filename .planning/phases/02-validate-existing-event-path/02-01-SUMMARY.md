@@ -107,6 +107,13 @@ None — no external service configuration required.
 - `python3 -m bench rowsplit.events_glm47_np1_500tok` ready to run on hardware — validates CORR-01 (no crash, 500+ tokens) and CORR-02 (stalls/token in expected range)
 - Phase 3 (event-based merge) can begin once hardware bench confirms CORR-01/CORR-02 pass
 
+## Self-Check: PASSED
+
+- FOUND: `.planning/phases/02-validate-existing-event-path/02-01-SUMMARY.md`
+- FOUND: `scripts/bench/tests/test_row_split.py`
+- FOUND: `llama.cpp/ggml/src/ggml-sycl/ggml-sycl.cpp` (C++ stall counter in place)
+- FOUND commit `07aa3f8`: feat(02-01): add GLM 500-token correctness bench test with stall validation (CORR-01/CORR-02)
+
 ---
 *Phase: 02-validate-existing-event-path*
 *Completed: 2026-03-18*
