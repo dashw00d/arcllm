@@ -26,7 +26,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. Starting llama.cpp with `GGML_SYCL_ROW_EVENTS=1` but without `SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1` aborts with a clear error message
   2. Starting llama.cpp with an OOO queue constructed from a different SYCL context than the in-order streams aborts with a clear error message
   3. Both assertions trigger before any matmul is dispatched (startup, not first inference)
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 01-01-PLAN.md — Add cmdlist + context assertions to SYCL init path, create bench test for validation
 
 ### Phase 2: Validate Existing Event Path
 **Goal**: The existing Phase 1-2 dispatch loop (OOO queues, event chains, barrier completion) is confirmed correct on GLM-4.7-Flash before Phase 3 is added
@@ -56,6 +58,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Harden Infrastructure | 0/? | Not started | - |
+| 1. Harden Infrastructure | 0/1 | Planned | - |
 | 2. Validate Existing Event Path | 0/? | Not started | - |
 | 3. Complete Event Path | 0/? | Not started | - |
