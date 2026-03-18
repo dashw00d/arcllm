@@ -14,8 +14,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Event Sync
 
-- [ ] **SYNC-01**: Phase 3 merge copies use `handler::depends_on(kernel_completion_event)` instead of blocking `dev2dev_memcpy_staged_sync`
-- [ ] **SYNC-02**: src1 copy cache stores last copy completion event per device and returns it to downstream matmuls via `depends_on()`
+- [x] **SYNC-01**: Phase 3 merge copies use `handler::depends_on(kernel_completion_event)` instead of blocking `dev2dev_memcpy_staged_sync`
+- [x] **SYNC-02**: src1 copy cache stores last copy completion event per device and returns it to downstream matmuls via `depends_on()`
 - [x] **SYNC-03**: Host stall counter instruments `queue.wait()` calls and reports count per token when `GGML_SYCL_ROW_EVENTS=1`
 
 ### Correctness
@@ -61,8 +61,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SYNC-03 | Phase 2 | Complete |
 | CORR-01 | Phase 2 | Complete |
 | CORR-02 | Phase 2 | Complete |
-| SYNC-01 | Phase 3 | Pending |
-| SYNC-02 | Phase 3 | Pending |
+| SYNC-01 | Phase 3 | Complete |
+| SYNC-02 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 7 total

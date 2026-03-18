@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-validate-existing-event-path/02-01-PLAN.md
-last_updated: "2026-03-18T03:56:23.025Z"
+stopped_at: Completed 03-complete-event-path/03-01-PLAN.md
+last_updated: "2026-03-18T04:16:57.197Z"
 last_activity: 2026-03-18 — Plan 01-01 (startup assertions) complete
 progress:
   total_phases: 3
   completed_phases: 2
-  total_plans: 2
-  completed_plans: 2
+  total_plans: 4
+  completed_plans: 3
   percent: 10
 ---
 
@@ -51,6 +51,8 @@ Progress: [█░░░░░░░░░] 10%
 
 *Updated after each plan completion*
 | Phase 02-validate-existing-event-path P01 | 4min | 3 tasks | 2 files |
+| Phase 03-complete-event-path P01 | 525680min | 2 tasks | 3 files |
+| Phase 03-complete-event-path P01 | 20min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -68,6 +70,9 @@ Recent decisions affecting current work:
 - [Phase 02-validate-existing-event-path]: Count ctx.stream()->wait() AND dev_events[i].wait() in stall counter; exclude ooo_stream flush (pool management, not inference stall)
 - [Phase 02-validate-existing-event-path]: Use ne11==1 for decode token boundary in stall counter; use thread_local for g_stall_count (safe for future parallel decode)
 - [Phase 02-validate-existing-event-path]: CORR-02 bench bound max<=10 stalls/token (generous); expected ~4 on 3x A770 (1 pre-sync + 3 Phase 2 event waits)
+- [Phase 03-complete-event-path]: SYNC-01: Phase 2 dev_events[i].wait() kept intentionally — ensures kernel output readable before merge copies read it; removing is Rule 4 architectural change
+- [Phase 03-complete-event-path]: SYNC-02: sycl::event default-constructed in cache entry struct initializer is valid; invalidate_row_src1_cache() zero-init already sets has_event=false without modification
+- [Phase 03-complete-event-path]: Phase 3 merge: src_ooo for GPU->staging, dst_ooo for staging->GPU_dst; dst_is_host uses src_ooo for both since host memory accessible from any queue
 
 ### Pending Todos
 
@@ -80,6 +85,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-18T03:55:13.868Z
-Stopped at: Completed 02-validate-existing-event-path/02-01-PLAN.md
+Last session: 2026-03-18T04:16:57.194Z
+Stopped at: Completed 03-complete-event-path/03-01-PLAN.md
 Resume file: None
