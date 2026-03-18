@@ -53,7 +53,7 @@ Plans:
   4. Benchmark results recorded in `test_row_split.py` docstring and `CLAUDE.md` key results table
 **Plans:** 2/2 plans complete
 Plans:
-- [ ] 03-01-PLAN.md — SYNC-02 src1 cache event propagation + SYNC-01 event-based Phase 3 merge
+- [x] 03-01-PLAN.md — SYNC-02 src1 cache event propagation + SYNC-01 event-based Phase 3 merge (completed 2026-03-18)
 - [ ] 03-02-PLAN.md — Bench test, hardware validation, results recording
 
 ## Progress
@@ -65,4 +65,4 @@ Phases execute in numeric order: 1 → 2 → 3
 |-------|----------------|--------|-----------|
 | 1. Harden Infrastructure | 1/1 | Complete    | 2026-03-18 |
 | 2. Validate Existing Event Path | 1/1 | Complete    | 2026-03-18 |
-| 3. Complete Event Path | 2/2 | Complete   | 2026-03-18 |
+| 3. Complete Event Path | 2/2 | Complete    | 2026-03-18 |
