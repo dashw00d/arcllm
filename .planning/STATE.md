@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
-stopped_at: Phase 1 context gathered
-last_updated: "2026-03-18T03:02:00.489Z"
-last_activity: 2026-03-17 — Roadmap created
+status: executing
+stopped_at: "Completed 01-harden-infrastructure/01-01-PLAN.md"
+last_updated: "2026-03-18T03:20:20Z"
+last_activity: 2026-03-18 — Plan 01-01 complete
 progress:
   total_phases: 3
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 1
+  completed_plans: 1
+  percent: 10
 ---
 
 # Project State
@@ -26,27 +26,27 @@ See: .planning/PROJECT.md (updated 2026-03-17)
 ## Current Position
 
 Phase: 1 of 3 (Harden Infrastructure)
-Plan: 0 of ? in current phase
-Status: Ready to plan
-Last activity: 2026-03-17 — Roadmap created
+Plan: 1 of ? in current phase (01-01 complete)
+Status: Executing
+Last activity: 2026-03-18 — Plan 01-01 (startup assertions) complete
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 10%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 6 min
+- Total execution time: 0.1 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01-harden-infrastructure | 1 | 6 min | 6 min |
 
 **Recent Trend:**
-- Last 5 plans: none yet
+- Last 5 plans: 01-01 (6 min)
 - Trend: -
 
 *Updated after each plan completion*
@@ -61,6 +61,9 @@ Recent decisions affecting current work:
 - [Setup]: Immediate command lists only — batched mode deadlocks cross-queue depends_on
 - [Setup]: New event-based path gated behind GGML_SYCL_ROW_EVENTS=1 — legacy path untouched
 - [Setup]: GLM-4.7-Flash as sole target for this milestone — generalize later
+- [01-01]: INFRA-01 placed in ggml_check_sycl() (not ooo_stream()) — fires before model loading, sub-5s abort
+- [01-01]: INFRA-02 placed in ooo_stream() lazy-init — fires before first matmul without needing backend context in init
+- [01-01]: g_ggml_sycl_row_events extern declaration added to common.hpp for INFRA-02 check
 
 ### Pending Todos
 
@@ -73,6 +76,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-18T03:02:00.487Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-harden-infrastructure/01-CONTEXT.md
+Last session: 2026-03-18T03:20:20Z
+Stopped at: Completed 01-harden-infrastructure/01-01-PLAN.md
+Resume file: .planning/phases/01-harden-infrastructure/01-01-SUMMARY.md

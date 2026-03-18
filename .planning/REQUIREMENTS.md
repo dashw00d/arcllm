@@ -9,8 +9,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Infrastructure
 
-- [ ] **INFRA-01**: System asserts `SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1` in C++ when `GGML_SYCL_ROW_EVENTS=1` is enabled
-- [ ] **INFRA-02**: System verifies OOO queue context matches in-order stream context at startup, crashes loudly if mismatched
+- [x] **INFRA-01**: System asserts `SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1` in C++ when `GGML_SYCL_ROW_EVENTS=1` is enabled
+- [x] **INFRA-02**: System verifies OOO queue context matches in-order stream context at startup, crashes loudly if mismatched
 
 ### Event Sync
 
@@ -56,8 +56,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INFRA-01 | Phase 1 | Pending |
-| INFRA-02 | Phase 1 | Pending |
+| INFRA-01 | Phase 1 | Complete (2026-03-18) |
+| INFRA-02 | Phase 1 | Complete (2026-03-18) |
 | SYNC-03 | Phase 2 | Pending |
 | CORR-01 | Phase 2 | Pending |
 | CORR-02 | Phase 2 | Pending |
@@ -71,4 +71,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-03-17*
-*Last updated: 2026-03-17 after roadmap creation*
+*Last updated: 2026-03-18 — INFRA-01, INFRA-02 complete (plan 01-01)*

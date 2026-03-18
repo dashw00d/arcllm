@@ -12,7 +12,7 @@ Phases 1-2 validate and harden the existing OOO queue + event chain infrastructu
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Harden Infrastructure** - Assert correct OOO queue context and enforce immediate command list requirement in code
+- [x] **Phase 1: Harden Infrastructure** - Assert correct OOO queue context and enforce immediate command list requirement in code (Plan 01-01 complete)
 - [ ] **Phase 2: Validate Existing Event Path** - Confirm Phase 1-2 of the dispatch loop is correct before adding Phase 3 work
 - [ ] **Phase 3: Complete Event Path** - Convert Phase 3 merge to event-based chains, propagate events through src1 cache, characterize throughput
 
@@ -28,7 +28,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Both assertions trigger before any matmul is dispatched (startup, not first inference)
 **Plans:** 1 plan
 Plans:
-- [ ] 01-01-PLAN.md — Add cmdlist + context assertions to SYCL init path, create bench test for validation
+- [x] 01-01-PLAN.md — Add cmdlist + context assertions to SYCL init path, create bench test for validation
 
 ### Phase 2: Validate Existing Event Path
 **Goal**: The existing Phase 1-2 dispatch loop (OOO queues, event chains, barrier completion) is confirmed correct on GLM-4.7-Flash before Phase 3 is added
@@ -58,6 +58,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Harden Infrastructure | 0/1 | Planned | - |
+| 1. Harden Infrastructure | 1/1 | Complete | 2026-03-18 |
 | 2. Validate Existing Event Path | 0/? | Not started | - |
 | 3. Complete Event Path | 0/? | Not started | - |
