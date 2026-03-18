@@ -299,3 +299,106 @@ class TestRowSplit(BenchTest):
         print(f"  CORR-01: PASS — {result.total_tokens} tokens, {result.total_tps:.1f} t/s")
         print(f"  CORR-02: PASS — avg stalls/token: {avg_stalls:.1f}, max: {max_stalls} "
               f"(from {len(counts)} samples)")
+
+    # ══ Phase 3: Complete event path (SYNC-01 + SYNC-02) ══════════
+
+    def test_sync01_event_merge_q4km_np1_100tok(self):
+        """SYNC-01: Phase 3 merge uses OOO queue + event-based copies (no host waits).
+
+        Previously: Phase 3 merge called dev2dev_memcpy_staged_sync which did
+        TWO blocking waits per column per device (q_src.memcpy().wait() +
+        q_dst.memcpy().wait()). With 2 non-main devices x ~224 merge ops each,
+        this was ~448 host stalls per token just in Phase 3.
+
+        Fix (ggml-sycl.cpp Phase 3, gated on use_event_sync):
+        - GPU_i VRAM -> pinned staging: OOO submit with depends_on(dev_events[i])
+        - staging -> dst: OOO submit chained on e_g2h
+        - Staging buffer reused across columns via e_prev_merge_staging (same
+          pattern as Phase 1 e_prev_staging_free)
+        - Zero host waits inside Phase 3 on the event path
+        - OOO flush at end of mul_mat ensures all merge copies complete
+
+        Legacy path (use_event_sync=false): unchanged in else branch.
+
+        Expected: stalls/token drops from ~9 to ~3 (only Phase 2 dev_events waits).
+        """
+        self.run(ROW_EVENTS.with_(
+            model="q4km", timeout=300,
+            name="sync01_event_merge_q4km_np1_100tok",
+            prompt=SHORT_PROMPT,
+            n_parallel=1, concurrent=1, context=4096,
+            max_tokens=100))
+
+    def test_sync02_cache_event_q4km_np1_100tok(self):
+        """SYNC-02: src1 cache propagates completion event on cache hit.
+
+        Previously: cache hit path set src1_ddq_i = cache.ddq_ptr and returned
+        with no event for downstream depends_on chains, creating a sync gap.
+        The pre-op barrier at line 4225-4228 fired unconditionally (correct for
+        non-main devices) but didn't explicitly chain on the cached data's copy
+        completion event.
+
+        Fix (ggml-sycl.cpp + common.hpp, gated on use_event_sync):
+        - row_src1_cache_entry gains two fields:
+          sycl::event last_copy_event — records barrier after copy+quantize
+          bool has_event             — guards depends_on on first access
+        - Cache MISS: stream->ext_oneapi_submit_barrier() stored as last_copy_event
+        - Cache HIT: stream->ext_oneapi_submit_barrier({cache.last_copy_event})
+          chains the cached event into this matmul's OOO queue
+
+        This closes the sync gap for consecutive matmuls sharing src1 (e.g.,
+        attn_q/k/v all reading attn_norm output on non-main devices).
+        """
+        self.run(ROW_EVENTS.with_(
+            model="q4km", timeout=300,
+            name="sync02_cache_event_q4km_np1_100tok",
+            prompt=SHORT_PROMPT,
+            n_parallel=1, concurrent=1, context=4096,
+            max_tokens=100))
+
+    def test_complete_event_path_glm47_np1_500tok(self):
+        """SYNC-01 + SYNC-02: complete event path end-to-end — stall reduction gate.
+
+        With all three sync improvements (Phase 1 event copy + Phase 3 event merge
+        + src1 cache event propagation), expected stall count drops:
+        - Before: ~9 stalls/token (Phase 1 pre-sync + Phase 2 + Phase 3 merges)
+        - After: ~3 stalls/token (Phase 2 dev_events[i].wait() only, 3 devices)
+
+        Phase 2 wait remains intentional: ensures kernel output is readable before
+        merge copies begin. Removing it would be a Rule 4 architectural change.
+
+        PASS criteria:
+        - completed == 1, total_tokens >= 500 (correctness)
+        - stalls/token <= 4 (SYNC-01+02 effective: only Phase 2 waits remain)
+        """
+        cfg = ROW_EVENTS.with_(
+            model="glm47-q4km", timeout=900,
+            name="complete_event_path_glm47_np1_500tok",
+            prompt=THINK_PROMPT,
+            n_parallel=1, concurrent=1, context=2048,
+            flash_attn=True,
+            max_tokens=500)
+        result = self.run(cfg)
+
+        assert not result.error, (
+            f"FAIL: server error: {result.error}")
+        assert result.completed == 1, (
+            f"FAIL: expected 1 completed request, got {result.completed}")
+        assert result.total_tokens >= 500, (
+            f"FAIL: expected >= 500 tokens, got {result.total_tokens}")
+
+        log_path = LOG_DIR / "complete_event_path_glm47_np1_500tok.log"
+        log_text = log_path.read_text() if log_path.exists() else ""
+        stall_lines = [l for l in log_text.splitlines() if "[EV] stalls/token:" in l]
+        assert len(stall_lines) > 0, (
+            f"FAIL: no '[EV] stalls/token:' lines in server log")
+        counts = [int(re.search(r"stalls/token: (\d+)", l).group(1)) for l in stall_lines]
+        max_stalls = max(counts)
+        avg_stalls = sum(counts) / len(counts)
+        assert max_stalls <= 4, (
+            f"SYNC-01/02 FAIL: max stalls/token = {max_stalls} (expected <= 4 after "
+            f"Phase 3 event merge + cache event propagation; counts: {counts[:10]}...)")
+
+        print(f"  PASS — {result.total_tokens} tokens, {result.total_tps:.1f} t/s")
+        print(f"  Stalls: avg {avg_stalls:.1f}/token, max {max_stalls} "
+              f"(from {len(counts)} samples)")
