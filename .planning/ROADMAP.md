@@ -40,7 +40,7 @@ Plans:
   3. The stall count is visible in bench output when `GGML_SYCL_ROW_EVENTS=1` is set
 **Plans:** 1/1 plans complete
 Plans:
-- [ ] 02-01-PLAN.md — Add stall counter instrumentation (SYNC-03), run GLM 500-token correctness bench (CORR-01/CORR-02)
+- [x] 02-01-PLAN.md — Add stall counter instrumentation (SYNC-03), run GLM 500-token correctness bench (CORR-01/CORR-02)
 
 ### Phase 3: Complete Event Path
 **Goal**: The last blocking stall site is eliminated — Phase 3 merge uses event-based chains, src1 cache propagates completion events, and throughput is characterized
@@ -51,7 +51,10 @@ Plans:
   2. Phase 3 merge no longer calls `dev2dev_memcpy_staged_sync` — uses `handler::depends_on()` chaining
   3. src1 cache hit path returns a completion event that downstream matmuls can chain `depends_on()` on — no silent sync gap
   4. Benchmark results recorded in `test_row_split.py` docstring and `CLAUDE.md` key results table
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 03-01-PLAN.md — SYNC-02 src1 cache event propagation + SYNC-01 event-based Phase 3 merge
+- [ ] 03-02-PLAN.md — Bench test, hardware validation, results recording
 
 ## Progress
 
@@ -61,5 +64,5 @@ Phases execute in numeric order: 1 → 2 → 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Harden Infrastructure | 1/1 | Complete    | 2026-03-18 |
-| 2. Validate Existing Event Path | 0/1 | Complete    | 2026-03-18 |
-| 3. Complete Event Path | 0/? | Not started | - |
+| 2. Validate Existing Event Path | 1/1 | Complete    | 2026-03-18 |
+| 3. Complete Event Path | 0/2 | Not started | - |
