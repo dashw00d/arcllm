@@ -22,7 +22,7 @@ The framework handles all of this automatically.
 ```bash
 # From scripts/ directory:
 python3 -m bench help                    # list all suites and tests
-python3 -m bench frontier                # run the regression baseline (17.5 t/s np=16)
+python3 -m bench frontier                # run the regression baseline (21.7 t/s np=16)
 python3 -m bench thinking.1x_1024tok    # run a specific test
 python3 -m bench baseline parallel       # run multiple suites
 ```
@@ -79,7 +79,7 @@ Do NOT create separate markdown docs for GPU/model/SYCL issues. The test file IS
 ### Config levers (scripts/bench/config.py)
 
 `BenchConfig` has every tunable parameter as a field. Use `.with_()` to derive variants:
-- Server: `model`, `split_mode`, `n_parallel`, `context`, `batch`, `ubatch`, `reasoning_budget`, `kv_quant`, `flash_attn`, `threads`
+- Server: `model`, `split_mode`, `n_parallel`, `context`, `batch`, `ubatch`, `reasoning_budget`, `kv_quant`, `flash_attn`, `threads`, `tensor_split`
 - SYCL env: `disable_graph`, `immediate_cmdlists`, `affinity`, `row_events`
 - Experimental: `sycl_flags` via `.with_flags(FUSED_MMQ="1")` for A/B testing new GGML_SYCL_* env vars
 - Test: `concurrent`, `max_tokens`, `prompt`, `timeout`
@@ -89,16 +89,30 @@ Do NOT create separate markdown docs for GPU/model/SYCL issues. The test file IS
 
 | Config | Result | Test |
 |--------|--------|------|
-| Q4_K_M np=16 cmdlist=0 | 17.5 t/s, 16/16 ok | `frontier.np16` |
+| Q4_K_M np=16 FUSED_MMQ=1 | **21.7 t/s**, 16/16 ok | `frontier.np16` |
 | Q8_0 any np | 3.3 t/s max (bandwidth-bound) | `baseline.q8` |
+| Qwen3-30B-A3B ablit np=16 | **~28 t/s**, 16/16 ok | manual (see below) |
 | Row-split stream->wait | 0.6 t/s np=1 (host stall bound) | `rowsplit.q4km_np1_100tok` |
 | Row-split OOO+events | TBD (testing) | `rowsplit.events_q4km_np1_100tok` |
 | Row-split event merge np=1 | TBD (pending hardware run) | `rowsplit.events_merge_glm47_np1_500tok` |
-| Batch/ubatch tuning | Zero effect | `syclenv.*` |
-| MMVQ NaN at 4x×1024tok | Crashes ~120s | `mmvqnan.4x_1024_crashes` |
+| Graph/cmdlist matrix | Zero effect on throughput | `syclenv.*` |
+| MMVQ NaN at 4x×1024tok | Crashes ~120s | `mmvqnan.4x_1024_mmvq_bug` |
 | Thinking 1x×1024tok | Works fine, 6.6 t/s | `thinking.1x_1024tok` |
 | Fused Q8_0 pp16 (1xA770) | 141 t/s (2.2x vs baseline 64) | `fusedmmq.fused_dp4a_pp128` |
 | Fused Q4_K_M np=16 3xA770 | **21.7 t/s (+25% vs 17.4)** | `fusedmmq.np16_fused` |
+
+### Model notes
+
+**DO NOT use `Qwen3-30B-A3B-REAM-heretic-i1`** — produces garbled output on both stable and eptp builds. This is a quantization/merge issue in that specific model, not an EP bug.
+
+**Use `Qwen3-30B-A3B-abliterated`** for MoE testing:
+```
+models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf
+```
+
+**Available MoE models:**
+- `Qwen3-30B-A3B-abliterated` — WORKS, clean output, ~28 t/s at np=16
+- `Qwen3-30B-A3B-REAM-heretic-i1` — BROKEN, garbled output (quantization issue)
 
 ## Project structure
 
