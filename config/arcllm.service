@@ -1,0 +1,16 @@
+[Unit]
+Description=ArcLLM Proxy (lazy-loading llama-server for 3x Arc A770)
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/home/ryan/llm-stack/scripts/arcllm-server.sh start
+ExecStop=/home/ryan/llm-stack/scripts/arcllm-server.sh stop
+PIDFile=/tmp/arcllm-server.pid
+Restart=on-failure
+RestartSec=10
+Environment=HOME=/home/ryan
+Environment=ARCLLM_PORT=11435
+
+[Install]
+WantedBy=default.target
