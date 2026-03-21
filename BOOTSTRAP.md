@@ -1,184 +1,119 @@
-# BOOTSTRAP: Expert Padding for ÷3 GPU Divisibility
+# BOOTSTRAP: Expert Parallelism on 3x Intel Arc A770
 
-## Goal
+## Current State
 
-Pad a GGUF MoE model's expert count from 128 → 129 (43×3) so it can be evenly split across 3x Intel Arc A770 GPUs for Expert Parallelism. The fake expert(s) should never fire and produce zero quality loss.
+**Expert padding: SOLVED.** The `pad-experts-gguf.py` script pads any MoE GGUF model for GPU divisibility. Proven working on Qwen2MoE (60→61) and Qwen3MoE (128→129) with layer-split.
 
-## The Model
+**EP (tensor-split): BROKEN.** The `llama.cpp-eptp` build has never produced clean output with `--split-mode tensor` on any MoE model. This is the next priority.
 
-- **Qwen3-30B-A3B-abliterated** Q4_K_M — 128 experts, 8 active per token, 48 layers
-- Path: `models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf` (17.28 GB)
-- This model works perfectly at 25.7 t/s with layer-split np=16
-- 128 ÷ 3 = 42.67 — doesn't divide cleanly, so EP (`--split-mode tensor`) crashes
+## Performance
 
-## The Approach
+| Config | Speed | Status |
+|--------|-------|--------|
+| 30B MoE abliterated, layer-split, np=16 | 39.4 t/s | ✅ Working (129 experts) |
+| 30B MoE abliterated, layer-split, np=1 | 15 t/s | ✅ Working (129 experts) |
+| 30B MoE abliterated, tensor-split EP | crashes/garbles | ❌ EP code broken |
 
-Pad at the GGUF binary level (no safetensors conversion needed):
+## The EP Bug
 
-1. **Expert FFN tensors** (`ffn_gate_exps`, `ffn_up_exps`, `ffn_down_exps`) — shape `[dim, dim, 128]` → `[dim, dim, 129]`. Append one expert's worth of zero bytes (quantized Q4_K/Q6_K zero blocks).
+EP code lives ONLY in `llama.cpp-eptp` (branch `ep-tp-combined`). It has never produced clean MoE output:
 
-2. **Router gate** (`ffn_gate_inp`) — shape `[2048, 128]` F32 → `[2048, 129]`. Append one row of `-1e9` so top-k never selects expert 128.
+1. **Original investigation (March 19-20):** 96-expert REAM model garbled with EP → turned out the REAM model itself was broken (garbled on all builds). Red herring.
 
-3. **Metadata** — update `qwen3moe.expert_count: 128 → 129`
+2. **128-expert abliterated model:** crashes with `GGML_ASSERT(split_state.ne[j] % tensor->src[i]->ne[src_split_states[i].axis] == 0)` because 128 ÷ 3 ≠ int.
 
-4. **Tensor offsets** — recalculate since padded tensors are larger, write actual offsets back into header.
+3. **129-expert padded model:** crashes in `ggml_backend_meta_get_split_state` on the gate bias tensor, then even after fixing that, **still garbles output**.
 
-## What We Built
+4. **Key finding:** The Opus agent confirmed that even the **original 128-expert model without padding** garbles with EP tensor-split on the eptp build. The EP code is fundamentally broken.
 
-Script: `scripts/pad-experts-gguf.py` — binary-level GGUF patcher.
+### What's wrong with the EP code
 
-## Current Status: BUG NOT IN SCRIPT
+The `llama.cpp-eptp` build has accumulated several experimental changes:
 
-**IMPORTANT**: The padding script was already correct. The Q4_K block size in the script is 144 bytes (confirmed against `ggml-common.h`):
-```python
-12: (256, 144),    # Q4_K  ← CORRECT
-```
+1. **`qwen3moe.cpp` deferred-PARTIAL fusion (commit 9fc046d19):**
+   - `ffn_norm` operates on `inpSA` instead of `ffn_inp` (mathematical change)
+   - Residual restructured: `combined_partial = wo_partial + moe_out`, then `cur = combined_partial + inpSA`
+   - `norm_w` changed to `true`
+   - Shared expert code removed
+   - **This was never validated on GPU (task #31 never ran)**
 
-The bug is NOT in the padding script - the padded model still produces garbage.
+2. **EP dispatch in `ggml-backend-meta.cpp`:**
+   - `handle_mul_mat_id` with SPLIT_AXIS_2
+   - `expert_offset` computation via op_params
+   - Subgraph boundary deferral for gate/up MUL_MAT_ID
+   - AllReduce for EP MoE path
 
-## What We Verified (All Correct)
+3. **EP-aware MUL_MAT_ID in `ggml-sycl.cpp`:**
+   - Pre-zero output for EP mode
+   - Expert filtering by ownership
+   - Local index remapping
 
-### Data integrity
-- **387 non-expert tensors**: byte-identical between original and padded ✅
-- **144 expert FFN tensors**: first 128 experts byte-identical ✅  
-- **48 router gate tensors**: experts 0-127 have original weights, expert 128 = all -1e9 ✅
-- **Router gate padding**: Verified all -1e9 for expert 128 across all 48 layers ✅
-- **FFN expert padding**: Verified all zero bytes for expert 128 (Q4_K blocks) ✅
-- **Q4_K zero block output**: Verified `d=0, min=0` → all dequantized values are 0 ✅
+4. **Debug instrumentation (commit 76b96dd1e):**
+   - WIP printf logging for ep_flag, AllReduce values, META_SPLITS
+   - Should be stripped before production
 
-### GGUF format
-- **Tensor offsets**: GGUF C reader validates stored offsets against recomputed sizes at load time. ✅
-- **Strides (nb[])**: `nb[2] = nb[1] * ne[1]` — independent of `ne[2]`. ✅
-- **Expert_count metadata**: correctly reads 129 from the padded file ✅
-- **Tensor shapes**: all expert tensors show ne[2]=129 in the loader ✅
+### Root cause candidates
 
-### Math
-- **Softmax**: `exp(-1e9) = 0.0` in float32. ✅
-- **Top-k selection**: identical indices for 128 vs 129 experts ✅
-- **Argsort stride**: `nb[1] = 129*4 = 516` ✅
+1. **Deferred-PARTIAL math is wrong:** The `ffn_norm(inpSA)` change is mathematically different from `ffn_norm(wo_out + inpSA)`. This was designed to enable AllReduce fusion but may produce numerically incorrect results. **Task #31 was supposed to validate this but never ran.**
 
-## Test Results
+2. **EP split state inference bugs:** The meta backend's `get_split_state` may not correctly infer split states for all ops in the MoE path (RESHAPE, VIEW, ADD with PARTIAL tensors).
 
-**Original model (128 experts)**:
-```
-reasoning: '<think>\nOkay, the user is asking "What is 2+2?". Let me check that. So, it\'s a simple math problem'
-```
-→ Clean, coherent output ✅
+3. **AllReduce boundary placement:** The deferred AllReduce boundaries may fire at the wrong positions, causing partial results to be consumed before reduction.
 
-**Padded model (129 experts)**:
-```
-22222
-is is is is is
-the the the the the
-```
-→ **Repetitive output, NOT random garbling** ❌
+4. **op_params encoding:** EP flag written to op_params[1]/[2] may conflict with other uses of those slots.
 
-The pattern is distinctly different from random garbage — the model outputs the same token repeatedly. This suggests the logits are collapsing to identical values for all positions (not randomness), or FFN output is zero/constant for all experts.
+## How to Debug EP
 
-## Root Cause Analysis
-
-The issue is NOT (all verified):
-- ❌ Q4_K block size (144 bytes correct)
-- ❌ Tensor offsets (GGUF loader validates cleanly)
-- ❌ Router gate -1e9 padding (mathematically correct, verified all -1e9)
-- ❌ FFN expert zero-padding (verified all zeros, Q4_K zeros produce 0 output)
-- ❌ SYCL kernel (happens on CPU too)
-- ❌ Power-of-2 template (256 experts also fails)
-- ❌ Model type detection (Qwen3MoE type determined by n_layer=48)
-- ❌ `cur_experts[LLAMA_MAX_EXPERTS]` stack array (512 pointers only)
-- ❌ `ggml_mul_mat_id` scratch buffer (dynamic sizing)
-- ❌ `ggml_view_2d` in expert aggregation (stride independent of ne[2])
-- ❌ `ggml_argsort_top_k` (uses dynamic nb[1])
-- ❌ `ggml_softmax` (generic implementation)
-
-**Unknown**: The padding is byte-perfect yet output is repetitive. The bug must be in how llama.cpp's MoE routing code handles a non-128 expert count somewhere that's not obvious from static code analysis. Expert profiling (`GGML_SYCL_PROFILE_EXPERTS=1`) is the next debug step.
-
-## How to Debug
-
-### Quick test
+### Step 1: Isolate deferred-PARTIAL from EP
+Test if the ORIGINAL `qwen3moe.cpp` (without deferred-PARTIAL changes) works with EP:
 ```bash
-# Regenerate padded model
-python3 scripts/pad-experts-gguf.py \
-  models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf \
-  models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m-129experts.gguf
-
-# Test padded model (garbled)
-source env.sglang-xpu.sh
-./llama.cpp-stable/build-sycl/bin/llama-server \
-  -m models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m-129experts.gguf \
-  --split-mode layer -ngl 99 -np 1 -c 512 --port 18404 --no-warmup -fa off
+# Revert qwen3moe.cpp to match qwen2moe.cpp structure (keep EP support, remove deferred-PARTIAL)
+# Build and test with --split-mode tensor
 ```
+If this works → deferred-PARTIAL is the bug. If not → EP dispatch itself is broken.
 
-### Expert profiling (SYCL)
+### Step 2: Test EP on a non-MoE tensor-split model
+Test EP tensor-split on the dense Qwen3-32B to verify TP itself works on the eptp build:
 ```bash
-# Enable expert profiling to see which experts are selected
-GGML_SYCL_PROFILE_EXPERTS=1 ./llama.cpp-stable/build-sycl/bin/llama-server \
-  -m models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m-129experts.gguf \
-  --split-mode layer -ngl 99 -np 1 -c 512 --port 18404 --no-warmup -fa off
+GGML_SYCL_DISABLE_GRAPH=1 SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0 \
+  ./llama.cpp-eptp/build-sycl/bin/llama-server \
+    -m models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf \
+    --split-mode tensor -ngl 99 -np 1 -c 512 --port 18404 --no-warmup
 ```
 
-### Expert profiling output interpretation
-- If expert 128 is selected: the -1e9 padding isn't working (unlikely given data verification)
-- If only experts 0-127 are selected but output is wrong: FFN computation issue
-- If no experts (all zeros): routing collapsed
-
-**Note**: Expert profiling requires a full server run (not raw curl) since SYCL device access fails in non-interactive mode. Use the bench framework or a long-running server instance.
+### Step 3: Debug with META_SPLITS logging
+```bash
+GGML_META_DEBUG_SPLITS=1 GGML_SYCL_DISABLE_GRAPH=1 \
+  ./llama.cpp-eptp/build-sycl/bin/llama-server \
+    -m models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m-129experts.gguf \
+    --split-mode tensor -ngl 99 -np 1 -c 256 --port 18404 --no-warmup -fa off
+```
+Check: subgraph count, AllReduce boundaries, PARTIAL/MIRRORED transitions.
 
 ## Key Source Files
 
-| File | What to look at |
-|------|----------------|
-| `ggml/src/ggml.c` | `ggml_new_tensor_impl` (stride computation) |
-| `ggml/src/ggml-cpu/ops.cpp` | `ggml_compute_forward_mul_mat_id` (CPU MoE dispatch) |
-| `src/llama-graph.cpp:1192` | `build_moe_ffn` (MoE graph construction) |
-| `src/llama-graph.h:717` | `n_expert` member - how it's used |
+| File | What |
+|------|------|
+| `llama.cpp-eptp/src/models/qwen3moe.cpp` | Modified MoE graph (deferred-PARTIAL) |
+| `llama.cpp-eptp/ggml/src/ggml-backend-meta.cpp` | EP dispatch, split state, AllReduce |
+| `llama.cpp-eptp/ggml/src/ggml-sycl/ggml-sycl.cpp` | EP-aware MUL_MAT_ID + debug logging |
+| `llama.cpp-eptp/src/llama-model.cpp` | SPLIT_AXIS_2 for expert tensors |
+| `llama.cpp-stable/src/models/qwen3moe.cpp` | Working reference (with gate bias, no EP) |
+| `scripts/pad-experts-gguf.py` | Expert padding script (working) |
 
-## What NOT to Do
+## Expert Padding (SOLVED — reference)
 
-- Don't test with REAM-heretic models — fundamentally broken
-- Don't pursue safetensors padding — GGUF approach is cleaner if we can fix it
-- Don't assume it's SYCL-specific — happens on CPU too
-- Don't waste time on padding script bugs — verified correct (data integrity passes)
-- Don't waste time on 128-hardcoded checks — verified absent or irrelevant
+Script: `scripts/pad-experts-gguf.py`
+- Pads expert count to next multiple of N GPUs
+- Gate weights = zero, gate bias = -1e30 for fake experts
+- Handles alignment (GGML_PAD), shared expert filtering, all quant types
+- Tested: Qwen2MoE 60→61 ✅, Qwen3MoE 128→129 ✅ (layer-split)
 
-## Critical Finding: Not About Expert Weights
+## Environment
 
-Tested duplicating expert 0 as expert 128 (valid weights, not zeros). **Still garbled** — different pattern (LaTeX-like gibberish instead of repetition), but still broken. This proves:
-
-- The fake expert's weights (zero or valid) are **irrelevant** — the router never selects expert 128
-- The corruption comes from having `n_expert=129` in the model structure itself
-- Something in the compute graph, tensor allocation, or MoE dispatch treats n_expert != 128 incorrectly
-- This is a **structural/code bug in llama.cpp**, not a data bug
-
-With zero padding: repetitive output ("22222", "is is is")
-With expert-0 duplication: varied gibberish ("equiv[\n{equiv(\\]")
-Both wrong. Both caused by n_expert=129.
-
-## Remaining Hypotheses (Post Zero-vs-Duplicate Test)
-
-1. **ggml_compute_forward_mul_mat_id scratch buffer**: The CPU `mul_mat_id` allocates `matrix_rows` as `n_as * ids->ne[0] * ids->ne[1] * sizeof(mmid_row_mapping)`. With n_as=129, this is slightly larger. If the wdata buffer wasn't sized for 129, it could overflow.
-
-2. **Graph scheduler buffer estimation**: `ggml_graph_compute` pre-allocates work buffers. If the estimation uses n_expert somewhere, a wrong size could cause silent memory corruption.
-
-3. **Qwen3MoE model code implicit assumptions**: Something in the Qwen3MoE model builder (`llama-model.cpp:3839`) might implicitly depend on n_expert matching the original model config in a way that's not obvious from tensor shapes.
-
-4. **The `n_ff_exp` computation**: Line 3882: `n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used`. If `n_ff_exp` is not set in metadata and computed from `n_ff / n_expert_used`, changing expert count could affect this. But we didn't change n_expert_used (still 8), so this should be fine. Verify: is `n_ff_exp` set in the GGUF metadata or computed?
-
-5. **Work buffer sizing in ggml-alloc**: The graph allocator sizes temporary buffers for each tensor. If any MoE-related tensor's size computation uses n_expert (the weight dimension) instead of n_expert_used (the dispatch dimension), the buffer could be wrong.
-
-## Next Diagnostic Steps
-
-1. **Add printf to CPU mul_mat_id**: In `ggml-cpu.c:1503`, print `n_as`, `n_ids`, buffer sizes. Compare 128 vs 129.
-
-2. **Check wdata sizing**: In `ggml_graph_plan` or `ggml_graph_compute`, find where wdata/work buffer is sized. Search for `MUL_MAT_ID` work size estimation.
-
-3. **Check n_ff_exp**: Verify the GGUF metadata has `qwen3moe.expert_feed_forward_length = 768` and it's being read correctly for both 128 and 129 expert models.
-
-4. **Binary comparison approach**: Run both models to generate 1 token, dump ALL intermediate tensor values after each layer, diff to find first divergence.
-
-## Alternative Approaches to Consider
-
-1. **Fix llama.cpp code** — instead of padding, implement proper unequal expert split (43/43/42) in the meta backend
-2. **Pad at safetensors level** — download FP16 safetensors, pad, re-quantize with llama.cpp's convert script (guaranteed correct metadata)
-3. **Find the llama.cpp bug** — the fact that n_expert≠128 breaks inference is likely a bug worth fixing upstream
-4. **Test with a smaller MoE model** — try padding Qwen1.5-MoE-A2.7B (60 experts) to 63 to see if the bug reproduces with any non-native expert count
+```bash
+source /home/ryan/llm-stack/env.sglang-xpu.sh
+# Stable build (layer-split, working): llama.cpp-stable/build-sycl/
+# EP build (tensor-split, broken): llama.cpp-eptp/build-sycl/
+# Build: cd build-sycl && cmake --build . --target llama-server -j$(nproc)
+```
