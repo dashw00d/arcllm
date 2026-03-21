@@ -56,3 +56,4 @@ nohup.out
 
 # Build artifacts
 /test_*
+/llama.cpp-qwen35/
