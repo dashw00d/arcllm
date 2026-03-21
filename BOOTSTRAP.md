@@ -256,6 +256,38 @@ Then compare the node sequence against `get_i_delayed`'s pattern matching. If th
 
 **Quick test:** Disable `get_i_delayed` entirely for EP (replace `i = get_i_delayed(i)` with no-op) and see if output becomes clean. If yes, `get_i_delayed` is the bug. If no, look elsewhere.
 
+## Graph Dump (captured from agent)
+
+First PARTIAL boundary for blk.0:
+```
+node[27] op=MUL_MAT              name=node_28          ← attention wo (PARTIAL)
+node[28] op=ADD                  name=ffn_inp-0        ← residual (starts new subgraph, MIRRORED)
+node[29] op=RMS_NORM             name=norm-0
+node[30] op=MUL                  name=ffn_norm-0
+node[31] op=MUL_MAT              name=ffn_moe_logits-0 ← router gate
+node[32] op=SOFT_MAX             name=ffn_moe_probs-0
+node[33-42] routing/weight normalization chain
+node[43] op=MUL_MAT_ID           name=ffn_moe_gate-0   ← EP PARTIAL
+node[44] op=MUL_MAT_ID           name=ffn_moe_up-0     ← EP PARTIAL  
+node[45] op=GLU                  name=ffn_moe_swiglu-0  ← should be PARTIAL
+node[46] op=MUL_MAT_ID           name=ffn_moe_down-0   ← EP PARTIAL → AllReduce here
+node[47] op=MUL                  name=ffn_moe_weighted-0
+```
+
+**Key finding:** `get_i_delayed` at node[27] (wo MUL_MAT) returns `delayed_i=27, extended=NO`.
+This means the attention AllReduce fires at node[27] and node[28] (ADD ffn_inp) starts as MIRRORED.
+
+This is the STANDARD attention path — the deferred-PARTIAL code in qwen3moe.cpp was supposed
+to keep wo output as PARTIAL and defer the AllReduce to after the MoE block. But the graph
+shows it hitting the normal MUL_MAT → AllReduce path.
+
+**Implication:** The `defer_attn_allreduce` lookahead in the meta backend may not be recognizing
+the modified qwen3moe.cpp graph structure, so it's NOT deferring and falls through to standard
+AllReduce at the wo projection. This means the 97→49 subgraph reduction never happens, and
+the residual path is standard (not deferred-PARTIAL). This might actually be OK — the MoE EP
+could still work if the MoE subgraph itself is correct. The remaining garbling could be in
+the MoE EP dispatch, not the deferred-PARTIAL structure.
+
 ## What NOT to Do
 
 - Don't test with REAM models — broken
