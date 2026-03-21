@@ -2,6 +2,27 @@
 
 This directory contains a user-space XPU setup and local API stack for a 3x Arc A770 machine.
 
+## Read First
+
+Before choosing a model/runtime path, read:
+
+- `/home/ryan/llm-stack/MODEL_STRATEGY.md`
+- `/home/ryan/llm-stack/AGENTS.md`
+- `/home/ryan/llm-stack/QWEN3_30B_A3B.md`
+- `/home/ryan/llm-stack/ROW_PROXY_0P6B.md`
+- `/home/ryan/llm-stack/ALT_RUNTIME_PROBES.md`
+
+Current practical summary:
+
+- stable Arc serving path: `env.api.xpu.sh` + `api/worker.py` + `api/router.py`
+- current fast-team proof: `Intel/Qwen3.5-9B-int4-AutoRound` via `start_team_9b_autoround.sh`
+- current multi-agent deliberation demo: archived experiment, not a reliable interaction model
+- current 27B result: useful as one stronger worker, not a fast 3-agent demo
+- current 30B result: official `Q6_K` on tuned `layer` split is the trusted triple-Arc path; `row` now boots but still corrupts decode, documented in `/home/ryan/llm-stack/QWEN3_30B_A3B.md`
+- current fast row-debug path: tiny `Qwen3-0.6B-Q8_0` GGUF matrix via `/home/ryan/llm-stack/scripts/run_qwen3_0_6b_row_matrix.sh`
+- current alt-runtime probes: OpenVINO and vLLM XPU are staged in `/home/ryan/llm-stack/ALT_RUNTIME_PROBES.md`
+- future "big smart model" direction: text-only MoE after the RAM upgrade, preferably through a backend with explicit hot/cold offload controls
+
 ## Layout
 
 - `env.xpu.sh`: runtime environment for the local Intel GPU userspace stack
@@ -48,6 +69,26 @@ Then point OpenAI-compatible tools at:
 OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 OPENAI_API_KEY=local
 ```
+
+## Triple-Arc orchestration
+
+Use the repo-local wrapper when you want the trusted 30B `layer` lane or the row research workflows without replacing the existing scripts:
+
+```bash
+./bin/arcllm up
+./bin/arcllm start-prod
+./bin/arcllm row-check
+./bin/arcllm row-rebuild
+./bin/arcllm stack-status
+```
+
+Notes:
+
+- `./bin/arcllm up` and `./bin/arcllm start-prod` both exec `scripts/run_qwen3_30b_a3b_gguf.sh` with the tuned triple-Arc `layer` profile.
+- `./bin/arcllm row-check` wraps `scripts/run_triplearc_row_reality_check.sh`.
+- `./bin/arcllm row-rebuild` wraps `scripts/run_triplearc_row_rebuild_and_verify.sh`.
+- `./bin/arcllm stack-status` summarizes the tuned prod lane plus the current row workflow artifacts under `runtime/workflows/triplearc-row/current`.
+- `arcllm status` remains the API service status command for the router/worker stack.
 
 OpenAI Responses API is available at the same base URL:
 

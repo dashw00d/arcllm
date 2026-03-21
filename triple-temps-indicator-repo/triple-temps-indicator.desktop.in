@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Triple Temps Indicator
-Comment=Show CPU and Intel Arc temperatures in the top bar
-Exec=@HOME@/.local/bin/triple-temps-indicator
-Terminal=false
-X-GNOME-Autostart-enabled=true
-OnlyShowIn=GNOME;ubuntu;

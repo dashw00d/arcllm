@@ -1,10 +1,55 @@
-.venv/
+# Local Python/Conda environments
+/.venv*/
+/.conda*/
+
+# Python caches
 __pycache__/
-*.pyc
-logs/
-runtime/
-runtime-upstream/
-debs/
-intel-upstream-debs/
-vllm/
-vllm-xpu-kernels/
+*.py[cod]
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+
+# Local logs and runtime state
+/logs/
+*.log
+*.pid
+nohup.out
+
+# Downloaded runtimes, models, and package payloads
+/runtime/
+/runtime-upstream/
+/vllm/
+/vllm-xpu-kernels/
+/sglang/
+/models/
+/debs/
+/intel-upstream-debs/
+/.apt-cache/
+/*.deb
+
+# Toolchain caches and local machine state
+/.igc*/
+/.ocloc*/
+/.sudo-password
+/cache/
+
+# Worktrees and subprojects (tracked in their own repos)
+/llama.cpp/
+/llama.cpp-stable/
+/llama.cpp-eptp/
+/pti-gpu/
+/OBLITERATUS/
+/triple-temps-indicator-repo/
+
+# Agent memory (session-specific, not project state)
+/.agent-memory/
+/.claude/
+/.opencode/
+
+# Editor/OS noise
+.DS_Store
+*.swp
+*.swo
+
+# Build artifacts
+/test_*

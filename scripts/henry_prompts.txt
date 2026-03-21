@@ -1,0 +1,18 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  HENRY'S CUSTOM ABLITERATION PROMPTS
+#
+#  Add one prompt per line. These are things you want Henry to STOP
+#  refusing. OBLITERATUS uses these as "harmful" prompts to identify
+#  and remove the refusal directions from the model weights.
+#
+#  The more specific and varied your prompts, the more thoroughly
+#  those refusal patterns get removed. Include variations of the
+#  same request phrased differently.
+#
+#  Lines starting with # are ignored.
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── ADD YOUR PROMPTS BELOW THIS LINE ──────────────────────────────────
+
+
+

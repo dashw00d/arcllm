@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-SOURCE_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
-ROOT="$(cd "$(dirname "$SOURCE_PATH")/.." && pwd)"
-exec "$ROOT/.venv/bin/python" "$ROOT/arcllm/cli.py" "$@"

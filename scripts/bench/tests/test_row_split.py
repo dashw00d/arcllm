@@ -140,10 +140,10 @@ ROW_BASE = BenchConfig(
     affinity="0,1,2", tensor_split="1,1,1",
 ).with_flags(ROW_ALLOW_MMVQ="1")
 
-# Event-based sync REQUIRES immediate command lists — batched mode deadlocks
-# because unflushed command list batches never signal their events for
-# cross-queue depends_on() calls.
-ROW_EVENTS = ROW_BASE.with_(row_events=True, immediate_cmdlists=True)
+# OOO queues use per-queue immediate cmdlists (set in common.hpp ooo_stream()).
+# Global env stays at 0 (batched) to avoid L0 event pool leaks — only
+# OOO queues need immediate mode for cross-queue depends_on().
+ROW_EVENTS = ROW_BASE.with_(row_events=True)
 
 
 class TestRowSplit(BenchTest):
@@ -152,7 +152,7 @@ class TestRowSplit(BenchTest):
     # ── Correctness: np=1 short generation ────────────────────────
     def test_q4km_np1_100tok(self):
         """32B Q4_K_M row-split np=1, 100 tokens — baseline correctness.
-        RESULT: PASS 0.4 t/s with pre-op + pre-merge stream->wait().
+        RESULT: PASS 0.6 t/s with staged buffers + src1 cache (was 0.4 t/s).
         GPUs idle 600MHz — host stalls dominate. Need event-based sync."""
         self.run(ROW_BASE.with_(
             model="q4km", timeout=300,
