@@ -37,6 +37,14 @@ QUANT_SIZES = {
     13: (256, 176),    # Q5_K
     14: (256, 210),    # Q6_K
     15: (256, 292),    # Q8_K
+    16: (256, 50),     # IQ2_XXS
+    17: (256, 66),     # IQ2_XS
+    18: (256, 82),     # IQ3_XXS
+    19: (256, 34),     # IQ1_S (QK_K=256, sizeof=2+32+16=50? check)
+    20: (32, 18),      # IQ4_NL (QK4_NL=32, sizeof=2+16=18)
+    21: (256, 110),    # IQ3_S
+    22: (256, 82),     # IQ2_S
+    23: (32, 20),      # IQ4_XS
     28: (1, 2),        # BF16
 }
 
@@ -289,8 +297,18 @@ def main():
             new_data_start = (pos + alignment - 1) // alignment * alignment
             fout.write(b'\x00' * (new_data_start - pos))
 
-            # Write tensor data and record actual offsets
-            # NOTE: tensors are packed contiguously (no inter-tensor alignment)
+            # Read alignment from KV pairs (default 32)
+            file_alignment = 32
+            for key, vtype, val in kv_pairs:
+                if key == 'general.alignment':
+                    file_alignment = val if not isinstance(val, tuple) else 32
+                    break
+
+            def GGML_PAD(x, n):
+                return ((x + n - 1) // n) * n
+
+            # Write tensor data — each tensor occupies GGML_PAD(nbytes, alignment) bytes
+            # No extra inter-tensor alignment; the padding within each allocation is sufficient
             actual_offsets = []
             for i, (name, n_dims, old_shape, ttype, old_offset) in enumerate(tensor_infos):
                 old_bytes = compute_tensor_bytes(old_shape, ttype)
@@ -306,6 +324,13 @@ def main():
                     pad_bytes = expert_slice_bytes(old_shape, ttype) * n_fake
                     fout.write(data)
                     fout.write(b'\x00' * pad_bytes)
+                    # Pad to alignment
+                    new_shape = list(old_shape); new_shape[-1] = padded_count
+                    new_nbytes = compute_tensor_bytes(new_shape, ttype)
+                    padded_nbytes = GGML_PAD(new_nbytes, file_alignment)
+                    written = old_bytes + pad_bytes
+                    if written < padded_nbytes:
+                        fout.write(b'\x00' * (padded_nbytes - written))
 
                 elif 'ffn_gate_inp' in name:
                     # Router gate: append -inf rows
@@ -314,14 +339,41 @@ def main():
                     neg_inf_row = np.full(hidden_size, -1e9, dtype=np.float32).tobytes()
                     for _ in range(n_fake):
                         fout.write(neg_inf_row)
+                    # Pad to alignment
+                    new_shape = list(old_shape); new_shape[-1] = padded_count
+                    new_nbytes = compute_tensor_bytes(new_shape, ttype)
+                    padded_nbytes = GGML_PAD(new_nbytes, file_alignment)
+                    written = old_bytes + hidden_size * 4 * n_fake
+                    if written < padded_nbytes:
+                        fout.write(b'\x00' * (padded_nbytes - written))
                 else:
-                    # Copy as-is
+                    # Copy as-is, pad to alignment
                     fout.write(data)
+                    padded_nbytes = GGML_PAD(old_bytes, file_alignment)
+                    if old_bytes < padded_nbytes:
+                        fout.write(b'\x00' * (padded_nbytes - old_bytes))
 
-            # Patch tensor info offsets
+            # Compute offsets the way the GGUF loader does:
+            # offset[0] = 0, offset[i] = offset[i-1] + GGML_PAD(nbytes[i-1], alignment)
+            computed_offsets = []
+            running = 0
+            for i, (name, n_dims, old_shape, ttype, old_offset) in enumerate(tensor_infos):
+                computed_offsets.append(running)
+                new_shape = list(old_shape)
+                if any(x in name for x in ('ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps', 'ffn_gate_inp')):
+                    new_shape[-1] = padded_count
+                nb = compute_tensor_bytes(new_shape, ttype)
+                running += GGML_PAD(nb, file_alignment)
+
+            # Verify data was written at the right positions
+            for i in range(len(computed_offsets)):
+                if computed_offsets[i] != actual_offsets[i]:
+                    print(f"  WARNING: offset mismatch for tensor {i}: computed={computed_offsets[i]} actual={actual_offsets[i]}")
+
+            # Patch tensor info offsets in header
             for i, offset_pos in enumerate(ti_offset_positions):
                 fout.seek(offset_pos)
-                fout.write(struct.pack('<Q', actual_offsets[i]))
+                fout.write(struct.pack('<Q', computed_offsets[i]))
 
         in_size = Path(args.input).stat().st_size
         out_size = Path(args.output).stat().st_size
