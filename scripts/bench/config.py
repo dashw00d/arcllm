@@ -8,13 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent  # llm-stack/
 
 MODELS = {
     "q4km": ROOT / "models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf",
-    "q8": ROOT / "models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q8_0.gguf",
-    "q8-abliterated": ROOT
-    / "models/Qwen/Qwen3-32B-abliterated-GGUF/Qwen3-32B-abliterated.Q8_0.gguf",
-    "0.6b-q8": ROOT / "models/Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf",
     "9b-q8": ROOT / "models/Qwen/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q8_0.gguf",
-    "glm47-q4km": ROOT
-    / "models/GLM-4.7-Flash-heretic-GGUF/GLM-4.7-Flash-ultimate-irrefusable-heretic-Q4_K_M.gguf",
     "qwen30b-ablit-q4km": ROOT
     / "models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf",
 }

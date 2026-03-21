@@ -57,70 +57,20 @@ def _register(name, path, flags, aliases=None):
         MODELS[a] = entry
 
 
-_register(
-    "nemotron-120b",
-    ROOT / "models/NVIDIA/Nemotron-3-Super-120B-A12B-GGUF"
-         / "nvidia_Nemotron-3-Super-120B-A12B-Q2_K"
-         / "nvidia_Nemotron-3-Super-120B-A12B-Q2_K-00001-of-00002.gguf",
-    "--split-mode layer -ngl 999 --tensor-split 1,1,1"
-    r" --override-tensor blk\.([1-5]\d|6[0-7])\.ffn_down_exps\.weight=CPU"
-    " -c 131072 -fa on -np 1 -b 4096",
-    aliases=["nemotron-3-super-120b"],
-)
-
-_register(
-    "qwen35-27b",
-    ROOT / "models/Qwen/Qwen3.5-27B-GGUF/Qwen3.5-27B-Q8_0.gguf",
-    "--split-mode layer -ngl 999 --tensor-split 1,1,1 -c 32768 -fa on -np 1 --reasoning off",
-    aliases=["qwen3.5-27b"],
-)
-
-_register(
-    "qwen35-9b",
-    ROOT / "models/Qwen/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q8_0.gguf",
-    "--split-mode layer -ngl 999 --tensor-split 1,1,1 -c 8192 -fa on -np 1 --reasoning off",
-    aliases=["qwen3.5-9b"],
-)
-
 SLOT_CACHE = str(ROOT / "cache" / "slots") + "/"
 
-_register(
-    "qwen3-32b-old",
-    ROOT / "models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q8_0.gguf",
-    f"--split-mode layer -ngl 999 --tensor-split 1,1,1 -c 65536 -fa on -np 1 --reasoning off -ctk q8_0 -ctv q8_0 --slot-save-path {SLOT_CACHE}",
-    aliases=[],
-)
-
-DRAFT_QWEN3_06B = ROOT / "models/Qwen/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf"
-
-# ── DEFAULT: Qwen3-32B Q4_K_M — max parallel throughput for churner ────────
-# Benchmarked 2026-03-16: 22.7 total t/s at 16 concurrent with FUSED_MMQ.
-# (was 17.4 t/s without fused kernel — +30% from fused dequant+matmul)
-# Q4_K_M (19GB) leaves 29GB for KV cache across 16 slots.
-# cmdlist=0 gives +7.5% throughput. Batch/ubatch tuning has zero effect.
-# Q8_0 caps at 3.3 t/s total regardless of concurrency (bandwidth-bound).
+# ── Qwen3-32B Q4_K_M (dense, DEFAULT) ────────────────────────────────────
+# 19GB model, 29GB free for KV. np=4 → slot 0 for Discord, slots 1-3 for churner.
+# FUSED_MMQ gives +25% at high batch (global SYCL_ENV).
+# Test: find max context that fits at np=4 and np=8.
 _register(
     "qwen3-32b",
     ROOT / "models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf",
     f"--split-mode layer -ngl 999 --tensor-split 1,1,1"
     f" -c 32768 -fa on"
-    f" -np 16 --slot-save-path {SLOT_CACHE}"
+    f" -np 4 --slot-save-path {SLOT_CACHE}"
     f" --reasoning-budget 0",
     aliases=["32b", "qwen3-32b-q4", "default"],
-)
-
-# ── GLM-4.7-Flash MoE — 30B/3.6B active, 64k context, 4 slots ────────────
-# MoE: 64 routed + 1 shared expert, 4 active/token. MLA attention.
-# 17 GB weights, 25 GB KV cache (4 slots × 64k), 96% VRAM utilization.
-# Benchmarked: 9.1 t/s at np=4 (no fused — batch=4 uses MMVQ, not fused).
-# Long gen (>500 tok multi-slot) crashes from F16 overflow bug.
-_register(
-    "glm47-flash",
-    ROOT / "models/GLM-4.7-Flash-heretic-GGUF/GLM-4.7-Flash-ultimate-irrefusable-heretic-Q4_K_M.gguf",
-    f"--split-mode layer -ngl 999 --tensor-split 1,1,1"
-    f" -c 65536 -fa on"
-    f" -np 4 --cache-reuse 256 --slot-save-path {SLOT_CACHE}",
-    aliases=["glm47", "glm-flash"],
 )
 
 # Single-slot reasoning variant — for interactive use where quality > throughput
@@ -131,11 +81,10 @@ _register(
     aliases=["qwen3-32b-think", "qwen3-32b-reasoning"],
 )
 
-# ── Qwen3-30B-A3B MoE (128 experts, 8 active) ──────────────────────────
-# 17.3 GB Q4_K_M — fits in VRAM with room for context
-# Layer-split: 13.7 t/s single-user, ~25 t/s aggregate at np=16
-# MoE with thinking mode — 13.7 t/s is viable for interactive use
-# -fa off: IGC crashes on MoE + flash attention
+# ── Qwen3-30B-A3B MoE ───────────────────────────────────────────────────
+# Abliterated model — fast MoE but outputs thinking as plain text (no <think> tags).
+# Use for churning (short outputs where thinking leak doesn't matter).
+# np=4 c=8192 → 2048 tokens/slot. -fa off: IGC crashes on MoE + flash attention.
 _register(
     "qwen3-30b-moe",
     ROOT / "models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf",
@@ -144,70 +93,6 @@ _register(
     f" -np 4 --no-warmup --slot-save-path {SLOT_CACHE}"
     f" --reasoning-budget 0",
     aliases=["qwen3-30b", "30b-moe", "moe"],
-)
-
-# Abliterated Q8_0 — higher quality but much slower (3.3 t/s, no parallel scaling)
-# 33 GB model fills VRAM, leaving little room for parallel KV caches.
-_register(
-    "qwen3-32b-q8",
-    ROOT / "models/Qwen/Qwen3-32B-abliterated-GGUF/Qwen3-32B-abliterated.Q8_0.gguf",
-    f"--split-mode layer -ngl 999"
-    f" -c 49152 -fa on"
-    f" -np 2 --cache-reuse 256 --slot-save-path {SLOT_CACHE}"
-    f" --reasoning-budget 0"
-    f" --threads 10",
-    aliases=["qwen3-32b-abliterated"],
-)
-
-# Speculative decoding variant — experimental. On Arc A770, spec decoding is
-# ~10% slower than baseline due to linear batch verify cost. Keep for testing.
-_register(
-    "qwen3-32b-spec",
-    ROOT / "models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf",
-    f"--split-mode layer -ngl 999 --tensor-split 1,1,1 -c 16384 -fa on -np 1 --slot-save-path {SLOT_CACHE} --reasoning-budget 200"
-    f" -md {DRAFT_QWEN3_06B} -ngld 999 --draft-max 4 --draft-min 0 --draft-p-min 0.9",
-    aliases=["qwen3-32b-speculative"],
-)
-
-# ── MoE Test: Row-Split + -cmoe architecture validation ──────────────────
-# Uses 30B-A3B (small MoE) to validate the flag combination before 235B.
-# Resource layout mirrors production: attention row-split on GPU, experts on CPU.
-QWEN3_30B_A3B = ROOT / "models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf"
-
-# Step 1: Row-split + -cmoe baseline (no spec)
-_register(
-    "qwen3-30b-test",
-    QWEN3_30B_A3B,
-    f"--split-mode row -ngl 999 --tensor-split 1,1,1 -cmoe"
-    f" -c 8192 -fa on -np 2 --cache-reuse 256 --slot-save-path {SLOT_CACHE}"
-    f" --reasoning-budget 0",
-    aliases=["30b-test"],
-)
-
-# Step 2: Row-split + -cmoe + spec decoding
-_register(
-    "qwen3-30b-spec-test",
-    QWEN3_30B_A3B,
-    f"--split-mode row -ngl 999 --tensor-split 1,1,1 -cmoe"
-    f" -c 8192 -fa on -np 2 --cache-reuse 256 --slot-save-path {SLOT_CACHE}"
-    f" --reasoning-budget 0"
-    f" -md {DRAFT_QWEN3_06B} -ngld 999 --draft-max 6 --draft-min 2 --draft-p-min 0.5 -devd SYCL0",
-    aliases=["30b-spec-test"],
-)
-
-# ── Qwen3-235B-A22B (production) ──────────────────────────────────────────
-# Layer-split + -cmoe: attention uses fast MMVQ kernels, experts on CPU.
-# Row-split tested at 0.46 t/s (DMMV fallback), layer-split gives 2-2.7 t/s.
-# No spec decoding: 30B-A3B draft adds marginal benefit at this speed.
-QWEN3_235B = ROOT / "models/Qwen/Qwen3-235B-A22B-Q3-abliterated/Q3_K_S-GGUF-00001-of-00011.gguf"
-
-_register(
-    "qwen3-235b",
-    QWEN3_235B,
-    f"--split-mode layer -ngl 999 -cmoe"
-    f" -c 8192 -fa on -np 2 --cache-reuse 256 --slot-save-path {SLOT_CACHE}"
-    f" --reasoning-budget 0",
-    aliases=["qwen3-235b-a22b", "235b"],
 )
 
 # ── Backend Manager ────────────────────────────────────────────────────────
@@ -659,13 +544,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 stream = req.get("stream", False)
                 max_tok = req.get("max_tokens")
 
-                # Pin priority to a slot when backend has multiple slots (np>1):
-                #   high → slot 0 (Discord), low → slot 1 (churner)
-                # Each slot has its own KV cache — warms independently.
+                # Slot assignment for multi-slot models (np>1):
+                #   high → slot 0 (Discord gets consistent KV cache)
+                #   low  → no pin (server assigns from any available slot)
                 # Skip for single-slot models to avoid "slot not found" errors.
                 n_par = MODELS.get(model_id, {}).get("n_parallel", 1) if model_id else 1
-                if n_par > 1 and "id_slot" not in req:
-                    req["id_slot"] = 0 if priority == "high" else 1
+                if n_par > 1 and "id_slot" not in req and priority == "high":
+                    req["id_slot"] = 0
                     body = json.dumps(req).encode()
 
                 log.info("REQ %s model=%s msgs=%d stream=%s max_tokens=%s priority=%s slot=%s path=%s",

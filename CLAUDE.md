@@ -34,7 +34,7 @@
 | Qwen3-30B-A3B-abliterated Q4_K_M | `models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf` | ✅ Works, 128 experts |
 | Qwen3-32B Q4_K_M | `models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf` | ✅ Works, dense |
 | Qwen1.5-MoE-A2.7B Q2_K | `models/Qwen/Qwen1.5-MoE-A2.7B-Chat-GGUF/Qwen1.5-MoE-A2.7B-Chat.Q2_K.gguf` | ✅ Works, fast iteration |
-| Qwen3-30B-A3B-REAM-heretic-i1 | `models/Qwen/Qwen3-30B-A3B-REAM-heretic-i1-GGUF/` | ❌ Broken |
+| Qwen3-30B-A3B-REAM-heretic-i1 | `models/Qwen/Qwen3-30B-A3B-REAM-heretic-i1-GGUF/` | ❌ Broken, deleted |
 
 ## Build
 
