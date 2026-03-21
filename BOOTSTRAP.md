@@ -152,6 +152,68 @@ grep "META_SPLITS" /tmp/ep-debug.log | head -60
 - Output nonzero per-GPU but AllReduce produces garbage → AllReduce implementation bug
 - Wrong number of subgraphs → AllReduce deferral still incorrect
 
+### Post-compute value analysis (what the Opus agent found)
+
+After adding EP_POST_DOWN dumps, the agent found **expert outputs have extreme/wrong values** that propagate through the residual stream. The `<think>` token generates correctly (first token OK) but subsequent tokens are garbled — classic sign of logits being corrupted by accumulated wrong FFN output.
+
+**Diagnostic: dump MoE output per-layer per-device**
+```cpp
+// After MUL_MAT_ID computation for down_exps, dump output stats:
+if (ep_flag && strstr(src0->name, "ffn_down_exps")) {
+    static int ep_post_count = 0;
+    int layer = -1;
+    const char * blk = strstr(src0->name, "blk.");
+    if (blk) layer = atoi(blk + 4);
+    if (layer <= 3 && ep_post_count < 30) {
+        ep_post_count++;
+        stream->wait();
+        int64_t total = ggml_nelements(dst);
+        int n = (total > 256) ? 256 : (int)total;
+        std::vector<float> buf(n);
+        stream->memcpy(buf.data(), dst->data, n * sizeof(float)).wait();
+        float sum = 0, absmax = 0; int nz = 0;
+        for (int k = 0; k < n; k++) {
+            if (buf[k] != 0) nz++;
+            sum += buf[k];
+            if (fabsf(buf[k]) > absmax) absmax = fabsf(buf[k]);
+        }
+        fprintf(stderr, "EP_POST_DOWN dev=%d layer=%d ne=%" PRId64 
+                " first4=[%.4f,%.4f,%.4f,%.4f] nz=%d/%d sum=%.2f absmax=%.4f\n",
+                ctx.device, layer, total, buf[0], buf[1], buf[2], buf[3], nz, n, sum, absmax);
+    }
+}
+```
+
+**What to look for:**
+- `absmax` should be moderate (1-100 range). If it's 1000+ on first layers, something is fundamentally wrong
+- Each GPU should have nonzero values only for its owned experts, zeros elsewhere
+- After AllReduce, all GPUs should have the same combined result
+- Compare against a layer-split run's MoE output values for reference
+
+### Hottest lead: `get_i_delayed` boundary mismatch
+
+The `get_i_delayed` function in `ggml-backend-meta.cpp` extends the AllReduce boundary past MoE aggregation ops (MUL, VIEW, ADD chains). It was written for the ORIGINAL graph structure.
+
+**The problem:** `qwen3moe.cpp` was modified with deferred-PARTIAL changes that restructured the residual path:
+- Original: `ffn_inp = wo_out + inpSA; moe_out = MoE(ffn_norm(ffn_inp)); cur = moe_out + ffn_inp`
+- Modified: `wo_partial = wo; moe_out = MoE(ffn_norm(inpSA)); combined = wo_partial + moe_out; cur = combined + inpSA`
+
+If `get_i_delayed` pattern-matches against the OLD op sequence (MUL → VIEW → ADD chain after MoE), it might walk past the wrong ops in the NEW graph, placing the AllReduce on an intermediate tensor instead of `ffn_moe_out`.
+
+**To investigate:**
+```bash
+# Run with both META_SPLITS and ALLREDUCE debug:
+GGML_META_DEBUG_SPLITS=1 ... > /tmp/ep-debug.log 2>&1
+
+# Check what tensor the AllReduce fires on:
+grep "EP ALLREDUCE\|get_i_delayed\|boundary" /tmp/ep-debug.log | head -30
+
+# The AllReduce should fire on the tensor AFTER the down_exps MUL_MAT_ID output
+# If it fires on a different tensor, get_i_delayed is walking too far
+```
+
+**The fix:** Either update `get_i_delayed` to match the new graph structure, or (simpler) disable `get_i_delayed` for EP mode and let each MUL_MAT_ID trigger its own AllReduce (more AllReduces but correct).
+
 ### Important notes
 - Use `static int count` guards to limit output (hot paths execute thousands of times)
 - Always `stream->wait()` before reading GPU memory with `stream->memcpy(...).wait()`
