@@ -1,119 +1,80 @@
-# BOOTSTRAP: Expert Parallelism on 3x Intel Arc A770
+# BOOTSTRAP: Expert Parallelism — Almost There
 
 ## Current State
 
-**Expert padding: SOLVED.** The `pad-experts-gguf.py` script pads any MoE GGUF model for GPU divisibility. Proven working on Qwen2MoE (60→61) and Qwen3MoE (128→129) with layer-split.
+**Expert padding: SOLVED.** Script `scripts/pad-experts-gguf.py` works on any MoE GGUF. Proven on Qwen2MoE (60→61) and Qwen3MoE (128→129) with layer-split.
 
-**EP (tensor-split): BROKEN.** The `llama.cpp-eptp` build has never produced clean output with `--split-mode tensor` on any MoE model. This is the next priority.
+**EP first bug FIXED.** AllReduce deferral was breaking the MoE block in half — GLU op between gate and up projections couldn't resolve its split state during peek-ahead, causing early AllReduce. Fixed by looking ahead for MUL_MAT_ID ops instead of resolving next-node split state.
 
-## Performance
+**EP second bug: ACTIVE.** Output went from all-zeros (`GGGGG...`) to varied garbled text at 3.74 t/s. Experts ARE computing. Opus agent deployed to find remaining correctness issue.
+
+## What Works
 
 | Config | Speed | Status |
 |--------|-------|--------|
-| 30B MoE abliterated, layer-split, np=16 | 39.4 t/s | ✅ Working (129 experts) |
-| 30B MoE abliterated, layer-split, np=1 | 15 t/s | ✅ Working (129 experts) |
-| 30B MoE abliterated, tensor-split EP | crashes/garbles | ❌ EP code broken |
+| 30B MoE layer-split np=16 (stable build) | 39.4 t/s | ✅ Flagship |
+| 30B MoE layer-split np=1 (stable build) | 15 t/s | ✅ Working |
+| Dense TP tensor-split (eptp build) | 20.7 t/s | ✅ TP infrastructure works |
+| MoE EP tensor-split (eptp build) | 3.74 t/s | ❌ Varied garbled output |
 
-## The EP Bug
+## EP Bug History (Tonight)
 
-EP code lives ONLY in `llama.cpp-eptp` (branch `ep-tp-combined`). It has never produced clean MoE output:
+1. **AllReduce deferral (FIXED):** The peek-ahead logic called `get_split_state()` on the GLU node whose inputs hadn't been processed yet. GLU returned MIRRORED instead of PARTIAL, causing AllReduce to fire between up and GLU — splitting the MoE block. Fix: look ahead for `MUL_MAT_ID` with `SPLIT_AXIS_2` instead of resolving intermediate split states.
 
-1. **Original investigation (March 19-20):** 96-expert REAM model garbled with EP → turned out the REAM model itself was broken (garbled on all builds). Red herring.
+2. **Remaining correctness issue (INVESTIGATING):** After fix #1, expert outputs are no longer zero but still produce garbled text. Possibilities:
+   - Deferred-PARTIAL math (`ffn_norm(inpSA)` vs `ffn_norm(ffn_inp)`) — untested, mathematically different
+   - Expert index remapping: `local_index = expert_id - expert_offset` might be off
+   - AllReduce boundary still not at the right position
+   - op_params encoding issue
 
-2. **128-expert abliterated model:** crashes with `GGML_ASSERT(split_state.ne[j] % tensor->src[i]->ne[src_split_states[i].axis] == 0)` because 128 ÷ 3 ≠ int.
-
-3. **129-expert padded model:** crashes in `ggml_backend_meta_get_split_state` on the gate bias tensor, then even after fixing that, **still garbles output**.
-
-4. **Key finding:** The Opus agent confirmed that even the **original 128-expert model without padding** garbles with EP tensor-split on the eptp build. The EP code is fundamentally broken.
-
-### What's wrong with the EP code
-
-The `llama.cpp-eptp` build has accumulated several experimental changes:
-
-1. **`qwen3moe.cpp` deferred-PARTIAL fusion (commit 9fc046d19):**
-   - `ffn_norm` operates on `inpSA` instead of `ffn_inp` (mathematical change)
-   - Residual restructured: `combined_partial = wo_partial + moe_out`, then `cur = combined_partial + inpSA`
-   - `norm_w` changed to `true`
-   - Shared expert code removed
-   - **This was never validated on GPU (task #31 never ran)**
-
-2. **EP dispatch in `ggml-backend-meta.cpp`:**
-   - `handle_mul_mat_id` with SPLIT_AXIS_2
-   - `expert_offset` computation via op_params
-   - Subgraph boundary deferral for gate/up MUL_MAT_ID
-   - AllReduce for EP MoE path
-
-3. **EP-aware MUL_MAT_ID in `ggml-sycl.cpp`:**
-   - Pre-zero output for EP mode
-   - Expert filtering by ownership
-   - Local index remapping
-
-4. **Debug instrumentation (commit 76b96dd1e):**
-   - WIP printf logging for ep_flag, AllReduce values, META_SPLITS
-   - Should be stripped before production
-
-### Root cause candidates
-
-1. **Deferred-PARTIAL math is wrong:** The `ffn_norm(inpSA)` change is mathematically different from `ffn_norm(wo_out + inpSA)`. This was designed to enable AllReduce fusion but may produce numerically incorrect results. **Task #31 was supposed to validate this but never ran.**
-
-2. **EP split state inference bugs:** The meta backend's `get_split_state` may not correctly infer split states for all ops in the MoE path (RESHAPE, VIEW, ADD with PARTIAL tensors).
-
-3. **AllReduce boundary placement:** The deferred AllReduce boundaries may fire at the wrong positions, causing partial results to be consumed before reduction.
-
-4. **op_params encoding:** EP flag written to op_params[1]/[2] may conflict with other uses of those slots.
-
-## How to Debug EP
-
-### Step 1: Isolate deferred-PARTIAL from EP
-Test if the ORIGINAL `qwen3moe.cpp` (without deferred-PARTIAL changes) works with EP:
-```bash
-# Revert qwen3moe.cpp to match qwen2moe.cpp structure (keep EP support, remove deferred-PARTIAL)
-# Build and test with --split-mode tensor
-```
-If this works → deferred-PARTIAL is the bug. If not → EP dispatch itself is broken.
-
-### Step 2: Test EP on a non-MoE tensor-split model
-Test EP tensor-split on the dense Qwen3-32B to verify TP itself works on the eptp build:
-```bash
-GGML_SYCL_DISABLE_GRAPH=1 SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0 \
-  ./llama.cpp-eptp/build-sycl/bin/llama-server \
-    -m models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf \
-    --split-mode tensor -ngl 99 -np 1 -c 512 --port 18404 --no-warmup
-```
-
-### Step 3: Debug with META_SPLITS logging
-```bash
-GGML_META_DEBUG_SPLITS=1 GGML_SYCL_DISABLE_GRAPH=1 \
-  ./llama.cpp-eptp/build-sycl/bin/llama-server \
-    -m models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m-129experts.gguf \
-    --split-mode tensor -ngl 99 -np 1 -c 256 --port 18404 --no-warmup -fa off
-```
-Check: subgraph count, AllReduce boundaries, PARTIAL/MIRRORED transitions.
-
-## Key Source Files
+## EP Code Locations
 
 | File | What |
 |------|------|
+| `llama.cpp-eptp/ggml/src/ggml-backend-meta.cpp` | EP dispatch, split state, AllReduce deferral (just fixed) |
+| `llama.cpp-eptp/ggml/src/ggml-sycl/ggml-sycl.cpp:4194` | SYCL EP-aware MUL_MAT_ID |
 | `llama.cpp-eptp/src/models/qwen3moe.cpp` | Modified MoE graph (deferred-PARTIAL) |
-| `llama.cpp-eptp/ggml/src/ggml-backend-meta.cpp` | EP dispatch, split state, AllReduce |
-| `llama.cpp-eptp/ggml/src/ggml-sycl/ggml-sycl.cpp` | EP-aware MUL_MAT_ID + debug logging |
-| `llama.cpp-eptp/src/llama-model.cpp` | SPLIT_AXIS_2 for expert tensors |
-| `llama.cpp-stable/src/models/qwen3moe.cpp` | Working reference (with gate bias, no EP) |
-| `scripts/pad-experts-gguf.py` | Expert padding script (working) |
+| `llama.cpp-eptp/src/llama-model.cpp:127` | SPLIT_AXIS_2 for expert tensors |
 
-## Expert Padding (SOLVED — reference)
-
-Script: `scripts/pad-experts-gguf.py`
-- Pads expert count to next multiple of N GPUs
-- Gate weights = zero, gate bias = -1e30 for fake experts
-- Handles alignment (GGML_PAD), shared expert filtering, all quant types
-- Tested: Qwen2MoE 60→61 ✅, Qwen3MoE 128→129 ✅ (layer-split)
-
-## Environment
+## Debug Commands
 
 ```bash
+# Build
+cd /home/ryan/llm-stack/llama.cpp-eptp/build-sycl
 source /home/ryan/llm-stack/env.sglang-xpu.sh
-# Stable build (layer-split, working): llama.cpp-stable/build-sycl/
-# EP build (tensor-split, broken): llama.cpp-eptp/build-sycl/
-# Build: cd build-sycl && cmake --build . --target llama-server -j$(nproc)
+cmake --build . --target llama-server -j$(nproc)
+
+# Test EP with debug
+pkill -x llama-server; sleep 2
+GGML_META_DEBUG_SPLITS=1 GGML_SYCL_DISABLE_GRAPH=1 SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0 \
+  ./bin/llama-server \
+    -m /home/ryan/llm-stack/models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf \
+    --split-mode tensor -ngl 99 -np 1 -c 256 --port 18404 --no-warmup \
+    > /tmp/ep-debug.log 2>&1 &
+
+# Query
+curl -s -X POST http://127.0.0.1:18404/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"test","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":20,"temperature":0}'
+
+# Check split states
+grep "META_SPLITS" /tmp/ep-debug.log | head -60
+
+# NOTE: -fa off crashes with tensor-split (V-cache reshape bug, separate issue)
+# Flash attention ON works fine
 ```
+
+## Key Facts
+
+- EP has NEVER produced clean output on any valid model (the 3.95 t/s REAM result was on a broken model)
+- Dense TP works perfectly on the eptp build — the bug is MoE-specific
+- GPU0 gets expert_offset=0, n_local=42 (128÷3 rotating 42/43/43) — split looks correct
+- Expert padding (128→129) is orthogonal to the EP bug — both 128 and 129 garble
+- The deferred-PARTIAL changes in qwen3moe.cpp (ffn_norm on inpSA, residual restructure) were NEVER GPU-validated (task #31)
+
+## What NOT to Do
+
+- Don't test with REAM models — broken
+- Don't use `-fa off` with tensor-split — crashes (separate bug)
+- Don't assume the deferred-PARTIAL math is correct — it hasn't been validated
+- Don't look at expert padding as the cause — proven working on layer-split
