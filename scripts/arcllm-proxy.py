@@ -131,6 +131,21 @@ _register(
     aliases=["qwen3-32b-think", "qwen3-32b-reasoning"],
 )
 
+# ── Qwen3-30B-A3B MoE (128 experts, 8 active) ──────────────────────────
+# 17.3 GB Q4_K_M — fits in VRAM with room for context
+# Layer-split: 13.7 t/s single-user, ~25 t/s aggregate at np=16
+# MoE with thinking mode — 13.7 t/s is viable for interactive use
+# -fa off: IGC crashes on MoE + flash attention
+_register(
+    "qwen3-30b-moe",
+    ROOT / "models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf",
+    f"--split-mode layer -ngl 99 --tensor-split 1,1,1"
+    f" -c 8192 -fa off"
+    f" -np 4 --no-warmup --slot-save-path {SLOT_CACHE}"
+    f" --reasoning-budget 0",
+    aliases=["qwen3-30b", "30b-moe", "moe"],
+)
+
 # Abliterated Q8_0 — higher quality but much slower (3.3 t/s, no parallel scaling)
 # 33 GB model fills VRAM, leaving little room for parallel KV caches.
 _register(
