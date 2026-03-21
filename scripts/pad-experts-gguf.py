@@ -232,6 +232,7 @@ def main():
         # Categorize tensors
         n_expert_tensors = 0
         n_gate_tensors = 0
+        gate_layer_indices = []  # block indices that have gate_inp (for bias tensors)
         total_pad_bytes = 0
         for name, n_dims, shape, ttype, offset in tensor_infos:
             if any(x in name for x in ('ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps')):
@@ -240,22 +241,48 @@ def main():
             elif name.endswith('ffn_gate_inp.weight') and 'shexp' not in name:
                 n_gate_tensors += 1
                 total_pad_bytes += shape[0] * 4 * n_fake  # F32 rows
+                # Extract block index for bias tensor creation
+                # name like "blk.0.ffn_gate_inp.weight"
+                parts = name.split('.')
+                for j, p in enumerate(parts):
+                    if p == 'blk' and j + 1 < len(parts):
+                        gate_layer_indices.append(int(parts[j + 1]))
+                        break
+                # Also account for the new bias tensor bytes
+                total_pad_bytes += padded_count * 4  # F32 bias [n_expert_padded]
 
         print(f"\n  {n_expert_tensors} expert FFN tensors")
         print(f"  {n_gate_tensors} router gate tensors")
+        print(f"  {n_gate_tensors} new gate bias tensors (to suppress fake experts)")
         print(f"  Total padding: {total_pad_bytes / 1024 / 1024:.1f} MB")
 
         if args.dry_run:
             print("\n--dry-run: stopping here")
             return
 
+        # Build bias tensor infos for each MoE gate layer
+        # These suppress fake experts: real experts get bias=0, fake experts get bias=-1e30
+        # This is added AFTER the dot product, so logit = dot(zero_row, hidden) + (-1e30) = -1e30
+        # regardless of hidden_state sign. Combined with zero gate weights, this guarantees
+        # fake experts are never selected.
+        bias_tensors = []  # (name, shape, data_bytes)
+        for blk_idx in sorted(gate_layer_indices):
+            bias_name = f"blk.{blk_idx}.ffn_gate_inp.bias"
+            bias_shape = [padded_count]
+            bias_data = np.zeros(padded_count, dtype=np.float32)
+            bias_data[expert_count:] = -1e30  # fake experts get -1e30
+            bias_tensors.append((bias_name, bias_shape, bias_data.tobytes()))
+
+        n_tensors_out = n_tensors + len(bias_tensors)
+
         # Write output
         print(f"\nWriting {args.output}...")
+        print(f"  Tensors: {n_tensors} → {n_tensors_out} (+{len(bias_tensors)} gate bias)")
         with open(args.output, 'wb') as fout:
             # Header
             fout.write(GGUF_MAGIC)
             fout.write(struct.pack('<I', version))
-            fout.write(struct.pack('<Q', n_tensors))
+            fout.write(struct.pack('<Q', n_tensors_out))
             fout.write(struct.pack('<Q', n_kv))
 
             # KV pairs (update expert_count)
@@ -292,6 +319,17 @@ def main():
                 ti_offset_positions.append(fout.tell())
                 fout.write(struct.pack('<Q', 0))  # placeholder
 
+            # Write bias tensor infos (F32, 1D)
+            bias_offset_positions = []
+            for bias_name, bias_shape, bias_bytes in bias_tensors:
+                write_string(fout, bias_name)
+                fout.write(struct.pack('<I', len(bias_shape)))  # n_dims = 1
+                for d in bias_shape:
+                    fout.write(struct.pack('<Q', d))
+                fout.write(struct.pack('<I', 0))  # type = F32
+                bias_offset_positions.append(fout.tell())
+                fout.write(struct.pack('<Q', 0))  # placeholder
+
             # Align to data start
             pos = fout.tell()
             new_data_start = (pos + alignment - 1) // alignment * alignment
@@ -320,6 +358,13 @@ def main():
                 nb = compute_tensor_bytes(new_shape, ttype)
                 running += GGML_PAD(nb, file_alignment)
 
+            # Compute offsets for bias tensors (appended after original tensors)
+            bias_offsets = []
+            for bias_name, bias_shape, bias_bytes in bias_tensors:
+                bias_offsets.append(running)
+                nb = len(bias_bytes)  # F32, simple
+                running += GGML_PAD(nb, file_alignment)
+
             # Pre-allocate the full data section with zeros
             fout.write(b'\x00' * running)
 
@@ -341,25 +386,40 @@ def main():
                     fout.write(b'\x00' * pad_bytes)
 
                 elif name.endswith('ffn_gate_inp.weight') and 'shexp' not in name:
-                    # Router gate: write original + -inf rows for fake experts
+                    # Router gate: write original + ZERO rows for fake experts
+                    # WHY zeros (not -1e9): The gate weight dot product is logit = dot(W_row, hidden_state).
+                    # With -1e9 weights, if sum(hidden_state) < 0, the logit becomes POSITIVE,
+                    # causing fake experts to be selected ~50% of the time. Zero weights always
+                    # produce logit = 0.0 regardless of input. The companion bias tensor then
+                    # adds -1e30 to fake expert logits, guaranteeing they're never selected.
                     fout.write(data)
                     hidden_size = old_shape[0]
-                    neg_inf_row = np.full(hidden_size, -1e9, dtype=np.float32).tobytes()
+                    zero_row = np.zeros(hidden_size, dtype=np.float32).tobytes()
                     for _ in range(n_fake):
-                        fout.write(neg_inf_row)
+                        fout.write(zero_row)
                 else:
                     # Copy as-is
                     fout.write(data)
 
-            # Write computed offsets into header
+            # Write bias tensor data
+            for j, (bias_name, bias_shape, bias_bytes) in enumerate(bias_tensors):
+                fout.seek(new_data_start + bias_offsets[j])
+                fout.write(bias_bytes)
+
+            # Write computed offsets into header (original tensors)
             for i, offset_pos in enumerate(ti_offset_positions):
                 fout.seek(offset_pos)
                 fout.write(struct.pack('<Q', computed_offsets[i]))
 
+            # Write computed offsets into header (bias tensors)
+            for j, offset_pos in enumerate(bias_offset_positions):
+                fout.seek(offset_pos)
+                fout.write(struct.pack('<Q', bias_offsets[j]))
+
         in_size = Path(args.input).stat().st_size
         out_size = Path(args.output).stat().st_size
         print(f"\nDone! {in_size/1024/1024/1024:.2f} GB → {out_size/1024/1024/1024:.2f} GB (+{(out_size-in_size)/1024/1024:.1f} MB)")
-        print(f"Fake experts will never be selected (router gate = -1e9)")
+        print(f"Fake experts suppressed via: zero gate weights + bias=-1e30 (sign-invariant)")
 
 
 if __name__ == "__main__":
