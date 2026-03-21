@@ -221,6 +221,41 @@ grep "EP ALLREDUCE\|get_i_delayed\|boundary" /tmp/ep-debug.log | head -30
 - Expert tensors have names like `blk.0.ffn_gate_exps.weight` — parse layer from name
 - Don't forget to strip debug prints before benchmarking (they kill performance)
 
+## Latest Agent Findings (ep-correctness-fixer, timed out)
+
+The agent spent 60 minutes and confirmed ALL data paths are correct:
+- ✅ Weight data matches GGUF exactly
+- ✅ Expert routing selects correct experts
+- ✅ Pre-zeroing works (zeros for non-owned experts)
+- ✅ No buffer overlap between GPUs
+- ✅ Individual expert outputs are mathematically correct (absmax=164, legitimate)
+
+**The issue is STRUCTURAL, not data.** The graph boundary placement is wrong.
+
+The agent was about to dump graph nodes 46-62 (the ops between down_exps MUL_MAT_ID and the AllReduce boundary) to verify `get_i_delayed` pattern matching when it timed out.
+
+### Next exact step
+
+Dump the actual graph nodes around the first PARTIAL boundary and compare against what `get_i_delayed` expects:
+
+```cpp
+// Add before the get_i_delayed call in the subgraph loop:
+static bool dumped = false;
+if (!dumped && split_state.axis == GGML_BACKEND_SPLIT_AXIS_PARTIAL) {
+    dumped = true;
+    fprintf(stderr, "=== GRAPH NODES around boundary at i=%d ===\n", i);
+    for (int d = -5; d <= 20 && i+d >= 0 && i+d < cgraph->n_nodes; d++) {
+        ggml_tensor * dn = cgraph->nodes[i+d];
+        fprintf(stderr, "  node[%d] op=%-20s name=%s\n", i+d, ggml_op_name(dn->op), dn->name);
+    }
+    fprintf(stderr, "=== END ===\n");
+}
+```
+
+Then compare the node sequence against `get_i_delayed`'s pattern matching. If the deferred-PARTIAL graph restructure changed the op sequence, `get_i_delayed` is walking past wrong ops.
+
+**Quick test:** Disable `get_i_delayed` entirely for EP (replace `i = get_i_delayed(i)` with no-op) and see if output becomes clean. If yes, `get_i_delayed` is the bug. If no, look elsewhere.
+
 ## What NOT to Do
 
 - Don't test with REAM models — broken
