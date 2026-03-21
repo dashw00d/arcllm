@@ -1,106 +1,92 @@
-# BOOTSTRAP: Expert Parallelism — GLU Split State Bug
+# BOOTSTRAP: Expert Parallelism — Aggregation Chain Bug
 
 ## Status
 - Expert padding: ✅ solved
 - EP AllReduce deferral: ✅ fixed
-- EP rotation: ✅ fixed (consistent expert distribution across layers)
+- EP rotation: ✅ fixed
+- EP GLU split state: ✅ fixed (assume_sync=false for GLU sources)
 - Dense TP on eptp build: ✅ works (20.7 t/s)
-- **GLU split state: ❌ THE REMAINING BUG**
+- EP MUL_MAT_ID compute: ✅ verified correct (matmul outputs nonzero per-expert)
+- **EP aggregation chain: ❌ THE REMAINING BUG**
 
 ## The Bug
 
-GLU op (node 45) shows `axis=MIRRORED` when its inputs (gate MUL_MAT_ID, up MUL_MAT_ID) are both PARTIAL:
+The per-expert matmul outputs are **correct** on all GPUs. But the aggregation chain (MUL weights → VIEW → ADD) that combines 8 expert outputs into a single [2048] vector **zeroes GPU0's contribution**.
 
+### Evidence
+
+**Raw MUL_MAT_ID output (CORRECT):**
 ```
-node[43] op=MUL_MAT_ID  axis=PARTIAL   defer=true   ← gate
-node[44] op=MUL_MAT_ID  axis=PARTIAL   defer=true   ← up
-node[45] op=GLU          axis=MIRRORED               ← WRONG! Should be PARTIAL
-node[46] op=MUL_MAT_ID  axis=PARTIAL   defer=false   ← down → AllReduce at node 62
+GPU0 blk.0 down_exps:
+  slot[0] nz=0     (expert 60 → GPU1, correctly zero)
+  slot[2] nz=2048  (expert 37 → GPU0, correctly nonzero!)  ← COMPUTED
+  slot[6] nz=2048  (expert 33 → GPU0, correctly nonzero!)  ← COMPUTED
+  (other slots correctly zero)
+
+GPU1 blk.0 down_exps:
+  slot[0] nz=2048  (expert 60 → GPU1)
+  slot[3] nz=2048  (expert 78 → GPU1)
+  slot[4] nz=2048  (expert 82 → GPU1)
+  slot[7] nz=2048  (expert 56 → GPU1)
 ```
 
-GLU uses `handle_generic(src_split_states, false)` which checks if all sources have the same split state. But `get_split_state` for GLU's sources (the MUL_MAT_ID outputs) doesn't return PARTIAL because the **subgraph sweep doesn't cache computed split states**. When GLU asks "what's my src[0]'s split state?", it recomputes from scratch and the MUL_MAT_ID output falls back to MIRRORED.
+**After aggregation (AllReduce input — WRONG):**
+```
+GPU0: nz=0/4096, sum=0.00, absmax=0.0000   ← ALL ZEROS despite having 2 nonzero slots!
+GPU1: nz=4096/4096, sum=-3.83, absmax=0.4947
+GPU2: nz=4096/4096, sum=-4.42, absmax=0.9897
+```
 
-## Root Cause: Split State Not Cached
+### What this means
 
-The subgraph boundary loop in `ggml-backend-meta.cpp` (around line 1030) calls `ggml_backend_meta_get_split_state(node)` for each graph node. This function computes the split state recursively from the node's sources. But it does NOT cache the result — each call recomputes.
+The matmul writes correct values to slots 2 and 6 in GPU0's output buffer. Then the aggregation ops (MUL by router weights, VIEW per slot, sequential ADD) run and produce a zero result. Either:
 
-For GLU at node 45:
-1. GLU calls `handle_generic` which calls `get_split_state(src[0])` for the gate MUL_MAT_ID output
-2. `get_split_state` for the MUL_MAT_ID output has to trace back to the MUL_MAT_ID op
-3. MUL_MAT_ID → `handle_mul_mat_id` → returns PARTIAL (correct)
-4. But somewhere in this recursive chain, the resolution fails and returns MIRRORED
+1. **The MUL/VIEW/ADD ops on GPU0 read from a different buffer** than what the matmul wrote to (meta backend buffer allocation issue)
+2. **The MUL zeros the data** — router weights on GPU0 might be wrong (but they're MIRRORED, same on all GPUs)
+3. **The VIEW offsets are wrong** on GPU0, reading from zeroed slots instead of slots 2 and 6
+4. **Buffer reuse** — a subsequent op's pre-zeroing overwrites the matmul output before aggregation reads it
 
-The fix needs to either:
-- **Cache split states** so GLU can look up its sources' already-computed states
-- **Special-case GLU** to propagate PARTIAL from any PARTIAL source
-- **Change the graph structure** to avoid GLU between PARTIAL MUL_MAT_IDs
+### Most likely: buffer pointer mismatch
 
-## What Was Already Tried (Didn't Work)
+The subgraph contains both the MUL_MAT_ID and the aggregation chain. The meta backend allocates per-GPU buffers for all tensors in the subgraph. If the intermediate tensor (down output) is allocated at a different address than where the matmul writes (`dst->data`), the aggregation reads stale/zeroed memory.
+
+## Debug: Trace the aggregation chain
+
+Add dumps at each step of the aggregation on GPU0:
 
 ```cpp
-// Attempted: force PARTIAL propagation from src[0]
-case GGML_OP_GLU: {
-    if (src_split_states[0].axis == GGML_BACKEND_SPLIT_AXIS_PARTIAL) {
-        split_state = src_split_states[0];
-    } else {
-        split_state = handle_generic(src_split_states, false);
-    }
-}
+// In the MoE aggregation code (build_moe_ffn in llama-graph.cpp):
+// After: experts = ggml_mul(ctx0, experts, weights);
+// The result 'experts' should still have nonzero at slots 2 and 6
+
+// Key: verify that experts->data == the MUL_MAT_ID dst->data on GPU0
+// If they differ, the meta backend allocated a new buffer for the MUL result
 ```
-This didn't work because `src_split_states[0].axis` is already MIRRORED by the time GLU processes it — the recomputation doesn't return PARTIAL.
 
-## Proposed Fix: Cache Split States in the Subgraph Loop
-
-The subgraph boundary loop already computes split states for every node. Add a `std::unordered_map<ggml_tensor*, ggml_backend_meta_split_state>` to cache results:
-
+Or add SYCL-side dump in the MUL kernel when one input is `ffn_moe_down`:
 ```cpp
-// In ggml_backend_meta_graph_compute, before the subgraph loop:
-std::unordered_map<ggml_tensor*, ggml_backend_meta_split_state> split_state_cache;
-
-// In the loop, after computing split_state for each node:
-split_state_cache[node] = split_state;
-
-// In get_split_state (or wherever src split states are resolved):
-// Check cache first before recomputing
-auto it = split_state_cache.find(tensor);
-if (it != split_state_cache.end()) return it->second;
+// Check if MUL(down_output, weights) reads from the correct buffer
 ```
 
-The challenge: `get_split_state` is a standalone function, not part of the loop. The cache would need to be passed as context or made a member of the buffer context.
+## Fixed Bugs (Don't Re-Investigate)
 
-## Alternative: Fix get_split_state for MUL_MAT_ID Outputs
+1. **AllReduce deferral** — GLU between gate/up couldn't resolve split state during peek-ahead. Fixed: look ahead for MUL_MAT_ID with SPLIT_AXIS_2 instead.
 
-The real question is: why does `get_split_state(MUL_MAT_ID_output)` return MIRRORED instead of PARTIAL?
+2. **Rotation** — `il % n_devices` rotated expert distribution per layer, making expert_offset inconsistent. Fixed: `effective_rotation=0` for SPLIT_AXIS_2.
 
-The function `get_split_state` works by looking at the TENSOR's properties:
-- If it's a weight tensor → look up split config by name
-- If it's a compute result → look at its op and sources recursively
+3. **GLU split state** — GLU returned MIRRORED because `handle_mul_mat_id` returns MIRRORED when `assume_sync=true`. Fixed: GLU source resolution uses `assume_sync=false`.
 
-For MUL_MAT_ID output (the dst tensor), `get_split_state` should call itself recursively on the MUL_MAT_ID op and return PARTIAL. **Debug this recursive chain to find where it fails.**
+4. **handle_mul_mat_id assertion** — Down projection src1 is PARTIAL (from GLU), not MIRRORED. Fixed: relaxed assertion.
 
-Add logging:
-```cpp
-// In get_split_state, at the top:
-static int gs_depth = 0;
-gs_depth++;
-if (gs_depth < 50 && strstr(tensor->name, "moe") != nullptr) {
-    fprintf(stderr, "GET_SPLIT_STATE depth=%d op=%s name=%s\n", gs_depth, ggml_op_name(tensor->op), tensor->name);
-}
-// ... compute split_state ...
-if (gs_depth < 50 && strstr(tensor->name, "moe") != nullptr) {
-    fprintf(stderr, "  -> axis=%d\n", split_state.axis);
-}
-gs_depth--;
-```
+## Verified Correct (Don't Re-Investigate)
 
-## Files to Edit
-
-| File | Line | What |
-|------|------|------|
-| `ggml/src/ggml-backend-meta.cpp` ~1030 | Subgraph boundary loop | Add split state cache |
-| `ggml/src/ggml-backend-meta.cpp` ~1391 | `handle_generic` | Where GLU resolves its sources |
-| `ggml/src/ggml-backend-meta.cpp` ~1485 | `handle_mul_mat_id` | Returns PARTIAL for EP |
-| `ggml/src/ggml-backend-meta.cpp` ~620 | `get_split_state` function | Recursive split state resolution |
+- Expert padding script ✅
+- Weight data integrity ✅
+- Expert routing selection ✅
+- Pre-zeroing ✅
+- Per-expert matmul outputs ✅ (verified per-slot, nonzero for owned experts)
+- get_i_delayed boundary extension ✅ (nodes 46→62, verified correct)
+- Dense TP ✅
 
 ## Build & Test
 
@@ -110,29 +96,27 @@ source /home/ryan/llm-stack/env.sglang-xpu.sh
 cmake --build . --target llama-server -j$(nproc)
 
 pkill -x llama-server; sleep 2
-GGML_META_DEBUG_SPLITS=1 GGML_SYCL_DISABLE_GRAPH=1 SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0 \
+GGML_SYCL_DISABLE_GRAPH=1 SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0 \
   ./bin/llama-server \
     -m /home/ryan/llm-stack/models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf \
-    --split-mode tensor -ngl 99 -np 1 -c 256 --port 18404 --no-warmup \
-    > /tmp/ep-debug.log 2>&1 &
-for i in $(seq 1 60); do curl -sf http://127.0.0.1:18404/health > /dev/null 2>&1 && break; sleep 3; done
+    --split-mode tensor -ngl 99 -np 1 -c 256 --port 18404 --no-warmup
 
-curl -s --max-time 120 -X POST http://127.0.0.1:18404/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"test","messages":[{"role":"user","content":"What is 2+2?"}],"max_tokens":20,"temperature":0}'
+# Check per-slot output (should show nonzero at owned expert slots):
+grep "EP_RAW_DOWN" /tmp/ep-debug.log
 
-# Check GLU split state (should be PARTIAL after fix):
-grep "META_SPLITS.*node\[45\]" /tmp/ep-debug.log
-# Check expert distribution (should be consistent):
-grep "EP META SET" /tmp/ep-debug.log | head -9
+# Check AllReduce input (GPU0 should be nonzero — currently broken):
+grep -A4 "AR #2" /tmp/ep-debug.log
+
+# Check matmul I/O (should be nonzero for processed experts):
+grep "EP_MM_OUT" /tmp/ep-debug.log
 ```
 
-## Verified Correct (Don't Re-Investigate)
-- Expert padding script ✅
-- Expert rotation (now disabled for SPLIT_AXIS_2) ✅
-- AllReduce deferral (looks ahead for MUL_MAT_ID) ✅
-- Weight data integrity ✅
-- Expert routing selection ✅
-- Pre-zeroing ✅
-- Individual expert compute outputs ✅
-- Dense TP on eptp build ✅
+## Key Files
+
+| File | What |
+|------|------|
+| `ggml/src/ggml-sycl/ggml-sycl.cpp:4194` | EP MUL_MAT_ID dispatch + debug dumps |
+| `ggml/src/ggml-backend-meta.cpp:961` | get_i_delayed (aggregation chain walk) |
+| `ggml/src/ggml-backend-meta.cpp:1098` | Subgraph boundary + AllReduce dispatch |
+| `src/llama-graph.cpp:1350` | `experts = ggml_mul(experts, weights)` aggregation |
+| `src/llama-graph.cpp:1380-1400` | VIEW + ADD expert sum chain |
