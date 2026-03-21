@@ -1,59 +1,56 @@
-# Local Python/Conda environments
-/.venv*/
-/.conda*/
-
-# Python caches
+# Python
 __pycache__/
 *.py[cod]
 /.pytest_cache/
 /.mypy_cache/
 /.ruff_cache/
 
-# Local logs and runtime state
+# Conda/venv (12GB+, reinstallable)
+/.venv*/
+/.conda*/
+
+# Logs and runtime state
 /logs/
 *.log
 *.pid
 nohup.out
 
-# Downloaded runtimes, models, and package payloads
+# Models (huge binaries, downloaded from HF)
+/models/
+
+# Build caches and compiler state
+/.igc*/
+/.ocloc*/
+/cache/
+
+# Downloaded runtimes and packages (reinstallable)
 /runtime/
 /runtime-upstream/
 /vllm/
 /vllm-xpu-kernels/
 /sglang/
-/models/
 /debs/
 /intel-upstream-debs/
 /.apt-cache/
 /*.deb
 
-# Toolchain caches and local machine state
-/.igc*/
-/.ocloc*/
-/.sudo-password
-/cache/
-
-# Worktrees and subprojects (tracked in their own repos)
+# llama.cpp worktrees — OUR WORK lives here but tracked in dashw00d/llama.cpp fork
+# Branches: stable-baseline, ep-tp-combined, qwen35-support
 /llama.cpp/
 /llama.cpp-stable/
 /llama.cpp-eptp/
-/pti-gpu/
-/OBLITERATUS/
-/triple-temps-indicator-repo/
+/llama.cpp-qwen35/
 
-# Agent memory (session-specific, not project state)
+# Third-party tools (have their own repos)
+/pti-gpu/
+
+# Agent/editor state
 /.agent-memory/
 /.claude/
 /.opencode/
-
-# Context archives (historical conversations, session dumps)
-/docs/context-archive/
-
-# Editor/OS noise
 .DS_Store
 *.swp
 *.swo
 
-# Build artifacts
-/test_*
-/llama.cpp-qwen35/
+# Secrets
+/.sudo-password
