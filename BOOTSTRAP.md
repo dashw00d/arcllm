@@ -72,6 +72,93 @@ grep "META_SPLITS" /tmp/ep-debug.log | head -60
 - Expert padding (128→129) is orthogonal to the EP bug — both 128 and 129 garble
 - The deferred-PARTIAL changes in qwen3moe.cpp (ffn_norm on inpSA, residual restructure) were NEVER GPU-validated (task #31)
 
+## Debug Methodology: EP printf-based Instrumentation
+
+The EP code runs on 3 GPUs simultaneously. Traditional debuggers don't work well. Use targeted `fprintf(stderr, ...)` instrumentation with build-test-read cycles.
+
+### Step 1: Add debug prints to the SYCL EP path
+
+The MUL_MAT_ID EP code is in `ggml/src/ggml-sycl/ggml-sycl.cpp` around line 4194. Key places to instrument:
+
+**Expert dispatch (which experts are selected per token):**
+```cpp
+// In the expert loop, after reading expert ID from routing:
+static int ep_dbg = 0;
+if (ep_dbg < 20) {
+    ep_dbg++;
+    fprintf(stderr, "EP_DISPATCH dev=%d expert_id=%d offset=%d n_local=%d %s\n",
+            ctx.device, expert_id, expert_offset, n_local_experts,
+            (expert_id >= expert_offset && expert_id < expert_offset + n_local_experts) ? "PROCESS" : "SKIP");
+}
+```
+
+**Post-compute output values (are expert outputs nonzero?):**
+```cpp
+// After the MUL_MAT_ID computation, for down_exps layers:
+if (ep_flag && strstr(src0->name, "ffn_down_exps")) {
+    stream->wait();
+    std::vector<float> buf(256);
+    stream->memcpy(buf.data(), dst->data, 256 * sizeof(float)).wait();
+    float sum = 0; int nz = 0;
+    for (int k = 0; k < 256; k++) { if (buf[k] != 0) nz++; sum += buf[k]; }
+    fprintf(stderr, "EP_POST_DOWN dev=%d [%s] first4=[%.4f,%.4f,%.4f,%.4f] nz=%d/256 sum=%.2f\n",
+            ctx.device, src0->name, buf[0], buf[1], buf[2], buf[3], nz, sum);
+}
+```
+
+**AllReduce values (what goes in and comes out):**
+```cpp
+// In ggml_backend_sycl_allreduce_tensor, after D2H copies:
+fprintf(stderr, "AR dev=%d [%s] first4=[%.4f,%.4f,%.4f,%.4f] nz=%d\n", ...);
+```
+
+### Step 2: Build and test
+```bash
+cd /home/ryan/llm-stack/llama.cpp-eptp/build-sycl
+source /home/ryan/llm-stack/env.sglang-xpu.sh
+cmake --build . --target llama-server -j$(nproc)
+
+pkill -x llama-server; sleep 2
+GGML_SYCL_DISABLE_GRAPH=1 SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0 \
+  ./bin/llama-server \
+    -m /home/ryan/llm-stack/models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf \
+    --split-mode tensor -ngl 99 -np 1 -c 256 --port 18404 --no-warmup \
+    > /tmp/ep-debug.log 2>&1 &
+
+for i in $(seq 1 60); do curl -sf http://127.0.0.1:18404/health > /dev/null 2>&1 && break; sleep 3; done
+curl -s --max-time 120 -X POST http://127.0.0.1:18404/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"test","messages":[{"role":"user","content":"Hi"}],"max_tokens":5,"temperature":0}'
+```
+
+### Step 3: Read the output
+```bash
+# Expert dispatch — are experts being processed or all skipped?
+grep "EP_DISPATCH" /tmp/ep-debug.log | head -30
+
+# Post-compute — are outputs nonzero?
+grep "EP_POST_DOWN" /tmp/ep-debug.log | head -30
+
+# AllReduce — are partial results being summed correctly?
+grep "AR " /tmp/ep-debug.log | head -20
+
+# Split state structure — correct subgraph boundaries?
+grep "META_SPLITS" /tmp/ep-debug.log | head -60
+```
+
+### Step 4: Interpret
+- All SKIP, no PROCESS → expert_offset or filtering check is wrong
+- PROCESS but output all zeros → pre-zeroing overwrites results, or local_index remapping is wrong
+- Output nonzero per-GPU but AllReduce produces garbage → AllReduce implementation bug
+- Wrong number of subgraphs → AllReduce deferral still incorrect
+
+### Important notes
+- Use `static int count` guards to limit output (hot paths execute thousands of times)
+- Always `stream->wait()` before reading GPU memory with `stream->memcpy(...).wait()`
+- The `ctx.device` field tells you which GPU (0, 1, 2)
+- Expert tensors have names like `blk.0.ffn_gate_exps.weight` — parse layer from name
+- Don't forget to strip debug prints before benchmarking (they kill performance)
+
 ## What NOT to Do
 
 - Don't test with REAM models — broken
