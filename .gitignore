@@ -46,6 +46,9 @@ nohup.out
 /.claude/
 /.opencode/
 
+# Context archives (historical conversations, session dumps)
+/docs/context-archive/
+
 # Editor/OS noise
 .DS_Store
 *.swp
