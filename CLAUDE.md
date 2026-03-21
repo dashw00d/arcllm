@@ -1,57 +1,82 @@
 # llm-stack
 
-3x Intel Arc A770 (48GB VRAM), i9-7900X, 64GB RAM. Runs Qwen3-32B via llama.cpp with SYCL backend.
+3x Intel Arc A770 (48GB VRAM), i9-7900X, 64GB RAM.
+
+## Current State
+
+**Flagship:** `llama.cpp-stable` (branch: `stable-baseline`) — the working build.  
+**EP experiment:** `llama.cpp-eptp` (branch: `ep-tp-combined`) — EP implementation, currently has WIP debug instrumentation, needs clean rebase before next EP work.
+
+## Performance Baseline
+
+| Config | Result | Notes |
+|--------|--------|-------|
+| Qwen3-30B-A3B ablit, layer-split, np=16 | **25.7 t/s** | Current flagship result |
+| Qwen3-32B Q4_K_M, tensor-split, np=16, FUSED_MMQ=1 | **21.7 t/s** | Dense model |
+| Qwen3-32B Q4_K_M, tensor-split, np=16, FUSED_MMQ=0 | **17.7 t/s** | Stable build (FUSED_MMQ not yet ported) |
+| MoE 2.7B, single GPU, np=1 | **20.7 t/s** | Fast iteration model |
+| Q8_0, any np | ~3.3 t/s | Bandwidth-bound, not worth optimizing |
+
+## Worktrees
+
+| Dir | Branch | Purpose |
+|-----|--------|---------|
+| `llama.cpp-stable/` | `stable-baseline` | **FLAGSHIP** — all working optimizations, bench framework docs |
+| `llama.cpp-eptp/` | `ep-tp-combined` | EP experiment — SPLIT_AXIS_2, EP dispatch, needs rebase |
+| `llama.cpp/` | `master` | Upstream tracking (row-split Nemotron experiments) |
+
+## Models
+
+**DO NOT use `Qwen3-30B-A3B-REAM-heretic-i1`** — garbled output on all builds. Quantization/merge issue, not an EP bug.
+
+| Model | Path | Status |
+|-------|------|--------|
+| Qwen3-30B-A3B-abliterated Q4_K_M | `models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf` | ✅ Works, 128 experts |
+| Qwen3-32B Q4_K_M | `models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf` | ✅ Works, dense |
+| Qwen1.5-MoE-A2.7B Q2_K | `models/Qwen/Qwen1.5-MoE-A2.7B-Chat-GGUF/Qwen1.5-MoE-A2.7B-Chat.Q2_K.gguf` | ✅ Works, fast iteration |
+| Qwen3-30B-A3B-REAM-heretic-i1 | `models/Qwen/Qwen3-30B-A3B-REAM-heretic-i1-GGUF/` | ❌ Broken |
+
+## Build
+
+```bash
+# Flagship build (use this)
+cd /home/ryan/llm-stack/llama.cpp-stable
+source ../env.sglang-xpu.sh
+cd build-sycl && cmake --build . --target llama-server -j$(nproc)
+
+# EP build
+cd /home/ryan/llm-stack/llama.cpp-eptp
+source ../env.sglang-xpu.sh
+cd build-sycl && cmake --build . --target llama-server -j$(nproc)
+```
+
+`llama.cpp/build-sycl` symlinks to `llama.cpp-stable/build-sycl` — the bench framework uses it.
 
 ## Benchmark Framework — MANDATORY for all GPU/model/server testing
 
-**NEVER run raw bash/curl commands to test llama-server configurations.** Use the benchmark framework at `scripts/bench/`. This is not optional.
+**NEVER run raw bash/curl commands to test llama-server configs.** Use `scripts/bench/`. This is not optional.
 
-### Why
-
-Raw bash testing caused weeks of wasted time:
-- Crashed GPUs left in DEVICE_LOST state, corrupting subsequent tests
-- No GPU utilization data, so we couldn't tell if GPUs were actually working
-- No automatic GPU reset between tests, so failures cascaded
-- No record of what was tested, so the same dead ends were re-explored
-- Environment issues (render group, conda, SYCL env) caused false negatives that were blamed on the wrong thing
-
-The framework handles all of this automatically.
-
-### How to use
+Raw bash testing caused cascading failures: crashed GPUs left in DEVICE_LOST, no GPU utilization data, no records of what was tested.
 
 ```bash
-# From scripts/ directory:
-python3 -m bench help                    # list all suites and tests
-python3 -m bench frontier                # run the regression baseline (21.7 t/s np=16)
-python3 -m bench thinking.1x_1024tok    # run a specific test
-python3 -m bench baseline parallel       # run multiple suites
+cd /home/ryan/llm-stack/scripts
+python3 -m bench help                       # list all suites and tests
+python3 -m bench frontier                   # regression baseline (21.7 t/s)
+python3 -m bench moefrontier.np16           # MoE baseline (25.7 t/s)
+python3 -m bench thinking.1x_1024tok        # specific test
 ```
 
-The framework automatically:
-- Acquires the `render` group (re-execs under `sg render` if needed)
-- Sources `env.sglang-xpu.sh` and builds the full SYCL environment
-- Resets GPUs between tests (kills stale servers, waits for recovery)
-- Starts/stops llama-server with the exact config
-- Fires concurrent async requests
-- Captures GPU freq/power/temp, CPU%, RAM during the test
-- Prints results with utilization data
-- Saves JSON to `/tmp/bench_results.json`
+The framework: acquires `render` group, sources env, resets GPUs between tests, captures GPU freq/power/temp, saves JSON to `/tmp/bench_results.json`.
 
-### How to add tests
+### Adding tests
 
-Create `scripts/bench/tests/test_<name>.py`:
+Create `scripts/bench/tests/test_<name>.py`. The module docstring IS the documentation — update it as you run tests. No separate markdown docs for GPU/SYCL issues.
 
 ```python
-"""One-line description of what this tests.
+"""One-line description.
 
-## Context
-Why this test exists, what bug/feature it exercises.
-
-## Results
-What we found (update as you run it).
-
-## Relevant Files
-- path/to/file.cpp — what's there
+## Context / Results / Relevant Files
+...
 """
 from bench.base import BenchTest
 from bench.config import BenchConfig
@@ -63,70 +88,55 @@ class TestName(BenchTest):
         self.run(self.base.with_(name="descriptive_name", disable_graph=True))
 ```
 
-It auto-discovers — no registration needed. Run with `python3 -m bench name`.
-
-### Tests ARE the documentation
-
-Each test file's module docstring is the living record of:
-- What the issue/feature is
-- How to reproduce it
-- What we tried and what happened
-- Crash logs and error patterns
-- Current status and workarounds
-
-Do NOT create separate markdown docs for GPU/model/SYCL issues. The test file IS the doc. When an issue is fixed, update the docstring — don't delete the test (it becomes the regression test).
-
 ### Config levers (scripts/bench/config.py)
 
-`BenchConfig` has every tunable parameter as a field. Use `.with_()` to derive variants:
-- Server: `model`, `split_mode`, `n_parallel`, `context`, `batch`, `ubatch`, `reasoning_budget`, `kv_quant`, `flash_attn`, `threads`, `tensor_split`
-- SYCL env: `disable_graph`, `immediate_cmdlists`, `affinity`, `row_events`
-- Experimental: `sycl_flags` via `.with_flags(FUSED_MMQ="1")` for A/B testing new GGML_SYCL_* env vars
+- Server: `model`, `split_mode`, `n_parallel`, `context`, `batch`, `flash_attn`, `kv_quant`
+- SYCL env: `disable_graph`, `immediate_cmdlists`, `affinity`
+- Experimental: `.with_flags(FUSED_MMQ="1")` for A/B env var testing
 - Test: `concurrent`, `max_tokens`, `prompt`, `timeout`
-- Build: `build` (subdir), `patches` (list of descriptions for patched builds)
-
-### Key known results
-
-| Config | Result | Test |
-|--------|--------|------|
-| Q4_K_M np=16 FUSED_MMQ=1 | **21.7 t/s**, 16/16 ok | `frontier.np16` |
-| Q8_0 any np | 3.3 t/s max (bandwidth-bound) | `baseline.q8` |
-| Qwen3-30B-A3B ablit np=16 | **~28 t/s**, 16/16 ok | manual (see below) |
-| Row-split stream->wait | 0.6 t/s np=1 (host stall bound) | `rowsplit.q4km_np1_100tok` |
-| Row-split OOO+events | TBD (testing) | `rowsplit.events_q4km_np1_100tok` |
-| Row-split event merge np=1 | TBD (pending hardware run) | `rowsplit.events_merge_glm47_np1_500tok` |
-| Graph/cmdlist matrix | Zero effect on throughput | `syclenv.*` |
-| MMVQ NaN at 4x×1024tok | Crashes ~120s | `mmvqnan.4x_1024_mmvq_bug` |
-| Thinking 1x×1024tok | Works fine, 6.6 t/s | `thinking.1x_1024tok` |
-| Fused Q8_0 pp16 (1xA770) | 141 t/s (2.2x vs baseline 64) | `fusedmmq.fused_dp4a_pp128` |
-| Fused Q4_K_M np=16 3xA770 | **21.7 t/s (+25% vs 17.4)** | `fusedmmq.np16_fused` |
-
-### Model notes
-
-**DO NOT use `Qwen3-30B-A3B-REAM-heretic-i1`** — produces garbled output on both stable and eptp builds. This is a quantization/merge issue in that specific model, not an EP bug.
-
-**Use `Qwen3-30B-A3B-abliterated`** for MoE testing:
-```
-models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf
-```
-
-**Available MoE models:**
-- `Qwen3-30B-A3B-abliterated` — WORKS, clean output, ~28 t/s at np=16
-- `Qwen3-30B-A3B-REAM-heretic-i1` — BROKEN, garbled output (quantization issue)
-
-## Project structure
-
-- `scripts/arcllm-proxy.py` — Lazy-loading reverse proxy for llama-server (Ollama-like)
-- `scripts/arcllm-server.sh` — Start/stop/status wrapper for the proxy
-- `scripts/bench/` — Benchmark framework (see above)
-- `llama.cpp/build-sycl/` — Clean SYCL build (use this, not `build/`)
-- `env.sglang-xpu.sh` — SYCL/conda/runtime environment setup
-- `models/` — GGUF model files
 
 ## Environment
 
-- Always source `env.sglang-xpu.sh` before running anything SYCL
+```bash
+source /home/ryan/llm-stack/env.sglang-xpu.sh   # always first
+```
+
 - User must be in `render` group for GPU access
-- `SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0` (batched) gives +7.5% throughput
-- `GGML_SYCL_DISABLE_GRAPH=1` is safer; `=0` is untested at long sequences
-- `GGML_SYCL_ROW_EVENTS=1` enables OOO queue + event-based sync for row-split (CUDA pattern)
+- `SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0` (batched) — +7.5% throughput
+- `GGML_SYCL_DISABLE_GRAPH=1` — safer; `=0` untested at long sequences
+- **IGC crashes on MoE + flash attention** — always use `flash_attn=False` for MoE tests
+- GPU card0 can go missing after hard resets — reboot restores it
+
+## Known Issues / Anti-Patterns
+
+- FUSED_MMQ not ported to stable build — MoE gets 25.7 t/s without it; dense loses ~4 t/s
+- EP (tensor-split) crashes in stable build — EP code only in `llama.cpp-eptp`
+- Don't trust `--split-mode tensor` in stable for MoE (GGML_ASSERT on split_state)
+- 128 experts ÷ 3 GPUs doesn't divide cleanly — EP needs padding/masking logic for abliterated model
+- REAM-heretic-i1 looks like an EP bug but isn't — it's broken on all builds
+
+## Next Priorities
+
+1. **Port FUSED_MMQ to stable** — recover 4 t/s on dense, probably free on MoE too
+2. **EP on abliterated model** — fix 128÷3 unequal split (padding/masking in meta backend)
+3. **N-gram speculative decoding** — zero-cost test, potentially +15%
+4. **Fused expert aggregation kernel** — designed, not built, estimated -55ms/token
+
+## Project Layout
+
+```
+llm-stack/
+├── CLAUDE.md                   ← This file
+├── env.sglang-xpu.sh           ← Always source this first
+├── llama.cpp-stable/           ← FLAGSHIP worktree
+│   ├── build-sycl/             ← Working binary
+│   └── docs/                   ← ROADMAP, TECHNIQUES, EP-DEBUG, etc.
+├── llama.cpp-eptp/             ← EP experiment worktree
+├── llama.cpp/                  ← Upstream tracking (master)
+├── models/                     ← GGUF model files
+├── scripts/
+│   ├── bench/                  ← Python benchmark framework
+│   ├── arcllm-proxy.py         ← Lazy-loading reverse proxy
+│   └── arcllm-server.sh        ← Start/stop wrapper
+└── cache/                      ← L0 compiler cache, KV slot saves
+```
