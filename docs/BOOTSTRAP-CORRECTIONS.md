@@ -2,6 +2,94 @@
 
 Audit by Orion (OpenClaw main agent) — has full session context from March 20-21 debugging.
 
+## 0. OVERALL: Missing Major Work Streams
+
+The BOOTSTRAP is shallow on recent March 20-21 work. Major missing topics:
+
+### Expert Padding (÷3 GPU Divisibility) — SOLVED
+Script `scripts/pad-experts-gguf.py` pads any MoE GGUF model's expert count for GPU divisibility. Binary-level GGUF patcher — no safetensors conversion needed.
+
+**How it works:**
+- Expert FFN tensors: append zero-weight quant blocks for fake experts
+- Router gate weights: set to zero (NOT -1e9 — dot product sign issue)
+- New `ffn_gate_inp.bias` tensors: -1e30 for fake experts (sign-invariant suppression)
+- Tensor count updated in GGUF header
+- Offsets computed using `GGML_PAD(nbytes, alignment)` per tensor
+
+**Critical bug we found and fixed:** Setting gate weights to -1e9 caused `dot([-1e9,...], hidden_state)` to produce POSITIVE logits when `sum(hidden_state) < 0` (~50% of tokens). The fake expert got selected with weight ≈ 1.0, zeroing MoE output. Fix: zero weights + bias tensor with -1e30.
+
+**Alignment bug fixed:** GGUF requires `GGML_PAD(nbytes, alignment)` between tensors, not contiguous packing. The 30B model passed validation by coincidence (all tensor sizes 32-byte aligned). The 2.7B exposed it (IQ4_NL tensors not aligned).
+
+**Shared expert filter:** `ffn_gate_inp_shexp` must NOT be padded (Qwen2MoE has separate shared experts).
+
+**llama.cpp changes for padding support:**
+- `llama-model.cpp`: Added `ffn_gate_inp_b` loading (`TENSOR_NOT_REQUIRED`) for Qwen3MoE
+- `qwen3moe.cpp`: Switched to extended `build_moe_ffn` with `gate_inp_b` parameter
+- Applied to both `llama.cpp-stable` and `llama.cpp-eptp` builds
+
+**Verified:**
+- Qwen2MoE 2.7B (60→61): ✅ Clean output, 26.1 t/s
+- Qwen3MoE 30B (128→129): ✅ Clean output, 15 t/s np=1, 39.4 t/s np=16 layer-split
+
+### EP Debugging Deep Dive — 4 Bugs Found and Fixed
+
+Dense TP works perfectly on the eptp build (20.7 t/s). MoE EP garbles. We isolated the bug to the MoE EP dispatch code through systematic elimination.
+
+**Bug 1: AllReduce deferral (FIXED)**
+The peek-ahead logic for defer_ep_allreduce called `get_split_state()` on the GLU node whose inputs hadn't been processed yet. GLU returned MIRRORED → AllReduce fired between up and GLU, splitting the MoE block in half.
+Fix: Look ahead for `MUL_MAT_ID` with `SPLIT_AXIS_2` instead of resolving intermediate split states.
+
+**Bug 2: Expert distribution rotation (FIXED)**
+`rotation = il % n_devices` caused different layers to have different per-GPU expert distributions. Layer 0: GPU1 owns experts 42-84. Layer 1: GPU1 owns experts 43-84. `expert_offset` was wrong for 2/3 of layers.
+Fix: `effective_rotation = 0` when `split_state.axis == SPLIT_AXIS_2`.
+
+**Bug 3: GLU split state (FIXED)**
+`handle_mul_mat_id` returns MIRRORED when `assume_sync=true` (correct for weight init). But GLU's source resolution in the subgraph sweep used `assume_sync=true`, so MUL_MAT_ID outputs resolved as MIRRORED instead of PARTIAL.
+Fix: GLU op source resolution uses `assume_sync=false`. Also relaxed `handle_mul_mat_id` assertion to accept PARTIAL src1 (down projection input).
+
+**Bug 4: Fused aggregation kernel (CURRENT BLOCKER)**
+Per-expert matmul outputs are verified correct (nonzero at correct slots, zero for non-owned experts). The `fused-expert-agg.cpp` kernel that replaces MUL+VIEW+ADD reads from the correct buffer but produces zeros. Likely doesn't handle EP's sparse expert slots.
+Evidence: `FUSED_AGG` kernel fires, reads same buffer pointer as MUL_MAT_ID wrote to, but AllReduce input shows GPU0 = all zeros despite having 2 nonzero expert slots.
+
+**Verification chain (all confirmed correct):**
+- Weight data integrity ✅
+- Expert routing selection ✅
+- Pre-zeroing ✅
+- Per-expert matmul outputs (verified per-slot) ✅
+- get_i_delayed boundary extension (nodes 46→62) ✅
+- Buffer pointers (FUSED_AGG reads same buffer MUL_MAT_ID wrote to) ✅
+- Dense TP on eptp build ✅
+
+### REAM Model Red Herring — ~12 Hours Wasted
+
+EP was originally tested on `Qwen3-30B-A3B-REAM-heretic-i1` (96 experts). It appeared to garble only with EP. After extensive investigation, MiniMax discovered the REAM model garbles on ALL builds including stable TP. The "EP bug" was actually a broken model.
+
+Models tested and rejected:
+- REAM-heretic-i1 Q4_K_M: garbled on all builds — DELETED
+- REAM-heretic Instruct-2507 Q4_K_M: also garbled — DELETED
+- REAP pruned 15B Q4_K_M: pruning destroyed quality — DELETED
+
+The 3.95 t/s EP result from the original EP commit was measured on the broken REAM model and is meaningless. EP has never produced clean output on any valid model.
+
+### Qwen3.5 35B MoE — New Architecture, Doesn't Work Yet
+
+Worktree: `llama.cpp-qwen35` (branch: `qwen35-support`)
+Architecture: `qwen35moe` — 256 experts, Gated Delta Net attention
+
+Two models tested (`HauhauCS-Aggressive`, `heretic-v2`), both garble at np=1 on a clean build from stable-baseline. The garbling is an upstream SYCL issue with Gated Delta Net attention, not our code. This is a separate workstream.
+
+### Project Reorganization (March 20)
+
+- Removed stale worktrees: `llama.cpp-expert`, `llama.cpp-tp` (branches preserved in git)
+- Consolidated CLAUDE.md as single project overview
+- Cleaned task board: 32 done tasks archived, fresh priorities
+- Gitignored worktrees, caches, agent memory
+- Updated journey.md with Chapter 14 (TP optimization marathon)
+
+### Thinking Mode Issue
+
+Qwen3 MoE has built-in `<think>` reasoning that consumes most token budget before producing visible content. Without `--reasoning-budget 0`, the model generates 150+ tokens of thinking and no visible reply. Critical for Discord bot use. The `/think` slash command enables reasoning on-demand with `reasoning_budget=4096`.
+
 ## 1. FUSED_MMQ + MoE: CONTRADICTS FLAGSHIP.md
 
 BOOTSTRAP says: "FUSED_MMQ crashes MoE at np=16 (server dies at 9.3s)"
