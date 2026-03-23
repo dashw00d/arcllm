@@ -159,15 +159,32 @@ Bot talks to proxy on `:11435`. High-priority (Discord) gets slot 0, low-priorit
 If GPUs go DEVICE_LOST (crash, bad kernel, etc):
 
 ```bash
-# Hardware reset via sysfs
+# Step 1: Kill all GPU consumers
+pkill -9 -f llama-server; pkill -9 -f arcllm-proxy; sleep 2
+
+# Step 2: Hardware reset via sysfs
 for p in /sys/class/drm/card*/device/reset; do echo 1 | sudo tee "$p"; done
 sleep 3
 
-# Or just restart the proxy — it auto-resets on crash
-systemctl --user restart arcllm
+# Step 3: Verify — if sycl-ls sees 3 GPUs, you're good
+source env.sglang-xpu.sh && sycl-ls | grep -c level_zero:gpu
+
+# Step 4: If sycl-ls sees 0 GPUs, unbind/rebind the i915 driver
+for pci in 0000:19:00.0 0000:67:00.0 0000:b5:00.0; do
+  echo "$pci" | sudo tee /sys/bus/pci/drivers/i915/unbind
+done
+sleep 2
+for pci in 0000:19:00.0 0000:67:00.0 0000:b5:00.0; do
+  echo "$pci" | sudo tee /sys/bus/pci/drivers/i915/bind
+done
+sleep 3
+sycl-ls | grep -c level_zero:gpu  # should show 3
 ```
 
-If card0 disappears entirely, reboot.
+The bench framework (`scripts/bench/runner.py`) does this automatically with
+fallback — sysfs reset first, then driver rebind if L0 still can't see GPUs.
+
+If card0 disappears entirely after all of this, reboot.
 
 ## Models
 

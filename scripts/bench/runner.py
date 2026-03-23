@@ -22,6 +22,13 @@ LOG_DIR.mkdir(exist_ok=True)
 # GPU device reset paths (Arc A770 on i915 driver).
 GPU_RESET_PATHS = sorted(Path("/sys/class/drm").glob("card*/device/reset"))
 
+# PCI addresses for i915 driver unbind/rebind (fallback when sysfs reset
+# doesn't restore Level Zero visibility).
+GPU_PCI_ADDRS = sorted(
+    str(p.resolve().parent.name)
+    for p in Path("/sys/class/drm").glob("card*/device/reset")
+)
+
 
 @dataclass
 class BenchResult:
@@ -96,6 +103,29 @@ class BenchRunner:
             except PermissionError:
                 # Needs root or specific udev rules. Log but don't fail.
                 pass
+            except Exception:
+                pass
+
+    @staticmethod
+    def _driver_rebind_gpus():
+        """Unbind/rebind i915 driver as fallback when sysfs reset doesn't
+        restore Level Zero visibility.
+
+        After a hard crash (e.g. DEVICE_LOST with zombie process holding
+        L0 handles), the sysfs reset can succeed at the hardware level but
+        Level Zero still sees 0 platforms. Unbinding and rebinding the i915
+        driver forces L0 to rediscover the devices.
+        """
+        i915_path = Path("/sys/bus/pci/drivers/i915")
+        for addr in GPU_PCI_ADDRS:
+            try:
+                (i915_path / "unbind").write_text(addr)
+            except Exception:
+                pass
+        time.sleep(2)
+        for addr in GPU_PCI_ADDRS:
+            try:
+                (i915_path / "bind").write_text(addr)
             except Exception:
                 pass
 
@@ -190,7 +220,17 @@ class BenchRunner:
             print(f"  GPUs not ready, waiting ({attempt + 1}/3)...")
             time.sleep(10)
 
-        print("  WARNING: GPUs not responding after reset")
+        # 5. Fallback: unbind/rebind i915 driver to force L0 rediscovery.
+        print("  sysfs reset insufficient, trying i915 driver rebind...")
+        self._driver_rebind_gpus()
+        time.sleep(5)
+        for attempt in range(3):
+            if self.check_gpus():
+                print("  GPUs ready (after driver rebind)")
+                return True
+            time.sleep(5)
+
+        print("  WARNING: GPUs not responding after reset + rebind")
         return False
 
     # ── Server lifecycle ──────────────────────────────────────────────
@@ -281,8 +321,20 @@ class BenchRunner:
                         return {"idx": idx, "tokens": 0, "time_s": dt,
                                 "tps": 0, "status": f"http:{resp.status}"}
                     tok = body.get("usage", {}).get("completion_tokens", 0)
+                    text = ""
+                    try:
+                        msg = body["choices"][0]["message"]
+                        text = msg.get("content") or ""
+                        reasoning = msg.get("reasoning_content") or ""
+                        if reasoning and not text:
+                            text = f"[thinking] {reasoning}"
+                        elif reasoning:
+                            text = f"[thinking] {reasoning}\n[response] {text}"
+                    except (KeyError, IndexError):
+                        pass
                     return {"idx": idx, "tokens": tok, "time_s": round(dt, 2),
-                            "tps": round(tok / dt, 1) if dt else 0, "status": "ok"}
+                            "tps": round(tok / dt, 1) if dt else 0, "status": "ok",
+                            "text": text}
             except asyncio.TimeoutError:
                 return {"idx": idx, "tokens": 0,
                         "time_s": round(time.monotonic() - t0, 2),
