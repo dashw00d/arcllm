@@ -107,7 +107,13 @@ def _from_jsonl(path: str) -> list[dict]:
 
 
 def _from_db(entity_type: str) -> list[dict]:
-    """Read queued sites from ghostgraph DB."""
+    """Read queued sites from ghostgraph DB.
+
+    Two sources are merged:
+    1. entity_audits with stage='pending' (normal pipeline flow)
+    2. Sites with status='queued' that have no entity_audit row yet
+       (bridges the seed_sites → batch_auditor handoff gap)
+    """
     try:
         import psycopg2
         from psycopg2.extras import RealDictCursor
@@ -115,22 +121,41 @@ def _from_db(entity_type: str) -> list[dict]:
         conn = psycopg2.connect(DB_URL)
         conn.autocommit = True
         cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        # ── Handoff gap fix: create entity_audit rows for queued sites that
+        #    don't have one yet (seed_sites only inserts into `sites` table).
         cur.execute(
-            "SELECT domain, entity_type, description FROM sites "
-            "JOIN entity_audits ea ON ea.site_id = sites.id "
-            "WHERE ea.stage = 'pending' AND ea.entity_type = %s "
-            "ORDER BY ea.created_at LIMIT 200",
-            (entity_type,)
+            """INSERT INTO entity_audits (site_id, entity_type, description, stage)
+               SELECT s.id, %s, 'seeded: ' || s.description, 'pending'
+               FROM sites s
+               WHERE s.status = 'queued'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM entity_audits ea
+                     WHERE ea.site_id = s.id AND ea.entity_type = %s
+                 )""",
+            (entity_type, entity_type),
+        )
+
+        # ── Normal: pick up all pending audits for this entity type
+        cur.execute(
+            """SELECT s.domain, ea.entity_type, ea.description
+               FROM sites s
+               JOIN entity_audits ea ON ea.site_id = s.id
+               WHERE ea.stage = 'pending' AND ea.entity_type = %s
+               ORDER BY ea.created_at LIMIT 200""",
+            (entity_type,),
         )
         rows = cur.fetchall()
         conn.close()
+
         items = []
         for row in rows:
-            scheme = "https://" if not row["domain"].startswith("http") else ""
+            domain = row["domain"]
+            scheme = "https://" if not domain.startswith("http") else ""
             items.append({
-                "url": f"{scheme}{row['domain']}",
+                "url": f"{scheme}{domain}",
                 "entity_type": row["entity_type"],
-                "description": row.get("description", ""),
+                "description": row.get("description") or "",
             })
         return items
     except Exception as e:
