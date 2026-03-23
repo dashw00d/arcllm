@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ app/
 COPY vendor/ vendor/
 COPY data/ data/
-COPY temporal_worker.py temporal_activities.py temporal_workflows.py ./
+COPY temporal_worker.py temporal_activities.py temporal_workflows.py temporal_workflows_v2.py temporal_activities_v2.py ./
 
 EXPOSE 8000
 
