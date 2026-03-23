@@ -216,7 +216,11 @@ Analyze these records and propose schema improvements. Output JSON with:
 - changelog: list of changes with rationale
 - confidence: 0.0-1.0"""
 
-    return await _llm_call(SCHEMA_ARCHITECT_SYSTEM_PROMPT, user_msg, temperature=0.3)
+    try:
+        return await _llm_call(SCHEMA_ARCHITECT_SYSTEM_PROMPT, user_msg, temperature=0.3)
+    except Exception as e:
+        log.warning("propose_schema_changes LLM call failed: %s", e)
+        return None
 
 
 @activity.defn
@@ -245,7 +249,11 @@ async def architect_groups(mission_id: str, facet_stats: list[dict]) -> list[dic
 
 Discover interesting multi-facet combinations for listing pages. Output a JSON array of groups."""
 
-    result = await _llm_call(GROUP_ARCHITECT_SYSTEM_PROMPT, user_msg, temperature=0.5)
+    try:
+        result = await _llm_call(GROUP_ARCHITECT_SYSTEM_PROMPT, user_msg, temperature=0.5)
+    except Exception as e:
+        log.warning("architect_groups LLM call failed: %s", e)
+        return []
     if isinstance(result, list):
         return result
     return []
