@@ -83,7 +83,13 @@ async def extract_record(record_id: str, raw_payload: dict, schema: dict) -> dic
 
 Extract all entities from this raw data according to the schema. Output valid JSON only."""
 
-    result = await _llm_call(EXTRACTOR_SYSTEM_PROMPT, user_msg)
+    try:
+        result = await _llm_call(EXTRACTOR_SYSTEM_PROMPT, user_msg)
+    except Exception as e:
+        log.error("extract_record LLM call failed for %s: %s", record_id, e)
+        await db.mark_raw_error(record_id)
+        return None
+
     if result:
         # LLM may return a list if raw data contains multiple entities — take first.
         if isinstance(result, list):
@@ -99,6 +105,7 @@ Extract all entities from this raw data according to the schema. Output valid JS
 async def resolve_and_merge(mission_id: str, entity: dict) -> dict | None:
     entity_type = entity.get("_type", "default")
     source_ids = [entity["_source_id"]] if entity.get("_source_id") else []
+    entity_name = entity.get("name") or entity.get("title") or None
 
     # Always insert the new entity first so it has a real DB ID
     entity_id = await db.insert_entity(
@@ -110,7 +117,7 @@ async def resolve_and_merge(mission_id: str, entity: dict) -> dict | None:
     for sid in source_ids:
         await db.mark_raw_done(sid)
 
-    candidates = await db.find_candidate_entities(mission_id, entity_type)
+    candidates = await db.find_candidate_entities(mission_id, entity_type, new_entity_name=entity_name)
 
     if not candidates:
         await db.mark_as_golden(entity_id)
@@ -133,7 +140,12 @@ async def resolve_and_merge(mission_id: str, entity: dict) -> dict | None:
 
 Are these the same real-world entity? If yes, produce the merged record."""
 
-        result = await _llm_call(RESOLVER_SYSTEM_PROMPT, user_msg, temperature=0.2)
+        try:
+            result = await _llm_call(RESOLVER_SYSTEM_PROMPT, user_msg, temperature=0.2)
+        except Exception as e:
+            log.warning("resolve_and_merge LLM call failed: %s", e)
+            result = None
+
         if result and result.get("verdict") == "same_as":
             await db.merge_into_golden(candidate["id"], entity_id, result["merged_record"])
             # Traits go on the golden record
@@ -157,11 +169,24 @@ async def mine_traits(entity_id: str) -> dict:
 
 Extract all searchable traits as key-value pairs."""
 
-    traits = await _llm_call(TRAIT_MINER_SYSTEM_PROMPT, user_msg, temperature=0.2)
+    try:
+        traits = await _llm_call(TRAIT_MINER_SYSTEM_PROMPT, user_msg, temperature=0.2)
+    except Exception as e:
+        log.warning("mine_traits LLM call failed for %s: %s", entity_id, e)
+        return {}
     if traits and isinstance(traits, dict):
         await db.update_entity_traits(entity_id, traits)
         return traits
     return {}
+
+
+@activity.defn
+async def recover_stuck_raw_ingests(mission_id: str, older_than_minutes: int = 60) -> int:
+    """Reset 'processing' records stuck for too long back to 'pending'.
+
+    Returns count of recovered records.
+    """
+    return await db.recover_stuck_raw_ingests(mission_id, older_than_minutes)
 
 
 # ── Schema evolution activities ───────────────────────────────────────────

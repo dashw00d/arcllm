@@ -113,16 +113,114 @@ async def update_entity_traits(entity_id: str, traits: dict):
     )
 
 
-async def find_candidate_entities(mission_id: str, entity_type: str, limit: int = 10) -> list[dict]:
-    """Find golden entities that might match a new extraction (simple approach)."""
+async def find_candidate_entities(mission_id: str, entity_type: str, new_entity_name: str | None = None, limit: int = 20) -> list[dict]:
+    """Find golden entities that might match a new extraction.
+
+    Strategy:
+    1. If new_entity_name is provided, use trigram similarity to find name-similar candidates
+    2. Fall back to recent golden entities if no name-based matches
+    """
+    pool = await get_pool()
+    candidates = []
+
+    if new_entity_name and len(new_entity_name) >= 2:
+        # Try trigram similarity match on name field
+        rows = await pool.fetch(
+            """SELECT id, data FROM entities
+               WHERE mission_id = $1 AND entity_type = $2 AND is_golden = true
+                 AND data->>'name' IS NOT NULL
+                 AND similarity(data->>'name', $3) > 0.3
+               ORDER BY similarity(data->>'name', $3) DESC
+               LIMIT $4""",
+            UUID(mission_id), entity_type, new_entity_name, limit,
+        )
+        candidates = [{"id": str(r["id"]), "data": r["data"]} for r in rows]
+
+        # Also grab ILIKE prefix matches (handles substring matches)
+        if len(candidates) < limit:
+            rows = await pool.fetch(
+                """SELECT id, data FROM entities
+                   WHERE mission_id = $1 AND entity_type = $2 AND is_golden = true
+                     AND data->>'name' IS NOT NULL
+                     AND (data->>'name' ILIKE '%' || $3 || '%'
+                          OR $3 ILIKE '%' || (data->>'name') || '%')
+                   LIMIT $4""",
+                UUID(mission_id), entity_type, new_entity_name, limit,
+            )
+            seen = {c["id"] for c in candidates}
+            for r in rows:
+                rid = str(r["id"])
+                if rid not in seen:
+                    candidates.append({"id": rid, "data": r["data"]})
+                    seen.add(rid)
+
+    # Fall back to recent golden entities if we don't have enough
+    if len(candidates) < limit:
+        fallback_limit = limit - len(candidates)
+        rows = await pool.fetch(
+            """SELECT id, data FROM entities
+               WHERE mission_id = $1 AND entity_type = $2 AND is_golden = true
+               ORDER BY updated_at DESC LIMIT $3""",
+            UUID(mission_id), entity_type, fallback_limit,
+        )
+        seen = {c["id"] for c in candidates}
+        for r in rows:
+            rid = str(r["id"])
+            if rid not in seen:
+                candidates.append({"id": rid, "data": r["data"]})
+
+    return candidates[:limit]
+
+
+async def find_near_duplicates(mission_id: str, entity_type: str = "default", threshold: float = 0.5) -> list[dict]:
+    """Find pairs of golden entities with similar names (potential duplicates).
+
+    Returns list of dicts with from_id, to_id, similarity_score.
+    """
     pool = await get_pool()
     rows = await pool.fetch(
-        """SELECT id, data FROM entities
-           WHERE mission_id = $1 AND entity_type = $2 AND is_golden = true
-           ORDER BY updated_at DESC LIMIT $3""",
-        UUID(mission_id), entity_type, limit,
+        """SELECT e1.id AS id1, e2.id AS id2,
+                  similarity(e1.data->>'name', e2.data->>'name') AS sim
+           FROM entities e1
+           JOIN entities e2 ON e1.mission_id = e2.mission_id
+             AND e1.entity_type = e2.entity_type
+             AND e1.id < e2.id
+             AND e1.is_golden = true AND e2.is_golden = true
+             AND e1.data->>'name' IS NOT NULL
+             AND e2.data->>'name' IS NOT NULL
+           WHERE e1.mission_id = $1 AND e1.entity_type = $2
+             AND similarity(e1.data->>'name', e2.data->>'name') > $3
+           ORDER BY sim DESC
+           LIMIT 500""",
+        UUID(mission_id), entity_type, threshold,
     )
-    return [{"id": str(r["id"]), "data": r["data"]} for r in rows]
+    return [{"id1": str(r["id1"]), "id2": str(r["id2"]), "similarity": float(r["sim"])} for r in rows]
+
+
+async def recover_stuck_raw_ingests(mission_id: str, older_than_minutes: int = 60) -> int:
+    """Reset 'processing' records stuck for too long back to 'pending'.
+
+    Returns count of recovered records.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT id FROM raw_ingests
+           WHERE mission_id = $1
+             AND status = 'processing'
+             AND processed_at < now() - interval '1 minute' * $2""",
+        UUID(mission_id), older_than_minutes,
+    )
+    count = len(rows)
+    if count > 0:
+        await pool.execute(
+            """UPDATE raw_ingests
+               SET status = 'pending', processed_at = NULL
+               WHERE mission_id = $1
+                 AND status = 'processing'
+                 AND processed_at < now() - interval '1 minute' * $2""",
+            UUID(mission_id), older_than_minutes,
+        )
+    return count
 
 
 async def merge_into_golden(golden_id: str, new_id: str, merged_data: dict):

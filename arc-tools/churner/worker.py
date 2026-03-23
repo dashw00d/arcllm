@@ -15,6 +15,7 @@ from activities import (
     resolve_and_merge, mine_traits, sample_recent_entities,
     propose_schema_changes, apply_schema_update,
     refresh_facet_catalog, get_facet_stats, architect_groups, upsert_group,
+    recover_stuck_raw_ingests,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -24,6 +25,7 @@ FAST_ACTIVITIES = [
     fetch_pending_records, get_active_schema, extract_record,
     mine_traits, sample_recent_entities, apply_schema_update,
     refresh_facet_catalog, get_facet_stats, upsert_group,
+    recover_stuck_raw_ingests,
 ]
 
 HEAVY_ACTIVITIES = [
