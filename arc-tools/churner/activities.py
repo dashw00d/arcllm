@@ -52,6 +52,7 @@ async def _llm_call(system_prompt: str, user_msg: str, temperature: float = 0.3,
         ],
         temperature=temperature,
         max_tokens=max_tokens,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
     return _parse_json(resp.choices[0].message.content)
 

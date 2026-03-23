@@ -76,7 +76,7 @@ services:
       - LLAMA_SERVER_URL=http://host.docker.internal:11435
       - DATABASE_URL=postgresql://temporal:temporal@db:5432/churner
       - MODEL=default
-      - MAX_TOKENS=300
+      - MAX_TOKENS=2048
     depends_on:
       - temporal
       - db
@@ -91,7 +91,7 @@ services:
       - LLAMA_SERVER_URL=http://host.docker.internal:11435
       - DATABASE_URL=postgresql://temporal:temporal@db:5432/churner
       - MODEL=default
-      - MAX_TOKENS=300
+      - MAX_TOKENS=2048
     depends_on:
       - temporal
       - db
