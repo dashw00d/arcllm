@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+import uuid
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -81,10 +82,20 @@ class PatternGrabWorkflow:
             )
 
             try:
+                # Extract selectors from dom_patterns (for link extraction on index pages)
+                index_selectors: dict | None = None
+                for dp in audit.dom_patterns:
+                    if dp.get("page_type") == "index" and dp.get("entity_selector"):
+                        index_selectors = {
+                            "entity_selector": dp.get("entity_selector", ""),
+                            "link_selector": dp.get("link_selector", ""),
+                        }
+                        break  # use first index-pattern with selectors
+
                 # Step 2: expand_urls — discover detail page URLs
                 expand_result: ExpandResult = await workflow.execute_activity(
                     expand_urls,
-                    args=[audit_id, audit.domain, audit.url_patterns],
+                    args=[audit_id, audit.domain, audit.url_patterns, index_selectors],
                     start_to_close_timeout=timedelta(minutes=15),
                     retry_policy=RETRY_SCRAPE,
                     task_queue="grabber",
@@ -134,7 +145,17 @@ class PatternGrabWorkflow:
                 if grab_result.chunks:
                     # Step 4: bridge to churner
                     source_tag = audit.domain
-                    mission_id = params.mission_id or "default"
+                    # Validate mission_id is a proper UUID — raw_ingests.mission_id is FK to missions.id
+                    mission_id = params.mission_id
+                    if not mission_id:
+                        workflow.logger.warning("No mission_id set — cannot bridge to churner, skipping")
+                        continue
+                    try:
+                        uuid.UUID(mission_id)
+                    except ValueError:
+                        workflow.logger.error("Invalid mission_id UUID '%s' — cannot bridge to churner", mission_id)
+                        errors.append({"audit_id": audit_id, "error": f"invalid mission_id: {mission_id}"})
+                        continue
                     bridged = await workflow.execute_activity(
                         bridge_pattern_grab_to_churner,
                         args=[mission_id, grab_result.chunks, source_tag],

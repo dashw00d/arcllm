@@ -192,17 +192,6 @@ async def fetch_completed_audits(entity_type: str | None = None) -> FetchComplet
 
 # ── Activity 2: expand_urls ─────────────────────────────────────────────
 
-async def _build_stealth_session():
-    """Build a StealthSession (simplified — no Redis needed for basic HTTP)."""
-    from vendor.transport import StealthSession
-    import redis.asyncio as aioredis
-
-    settings = get_settings()
-    redis_client = await aioredis.from_url(settings.redis_url, decode_responses=True)
-    session = StealthSession(redis_client=redis_client)
-    return session
-
-
 def _expand_url_pattern(base_url: str, pattern: str, max_pages: int | None) -> list[str]:
     """
     Expand a URL pattern into concrete URLs.
@@ -276,7 +265,8 @@ async def _fetch_and_extract_links(
 
 
 @activity.defn
-async def expand_urls(audit_id: str, domain: str, url_patterns: list[dict]) -> ExpandResult:
+async def expand_urls(audit_id: str, domain: str, url_patterns: list[dict],
+                      index_selectors: dict | None = None) -> ExpandResult:
     """
     For each url_pattern in audit's url_patterns:
     - Expand pagination patterns
@@ -324,10 +314,13 @@ async def expand_urls(audit_id: str, domain: str, url_patterns: list[dict]) -> E
 
         for page_url in first_urls:
             activity.heartbeat()
+            # Use index_selectors from dom_patterns if available; fall back to pagination_selector
+            entity_sel = (index_selectors["entity_selector"] if index_selectors else None)
+            link_sel = (index_selectors["link_selector"] if index_selectors else pagination_selector)
             links, err = await _fetch_and_extract_links(
                 session, page_url,
-                entity_selector=None,  # will be passed via dom_patterns
-                link_selector=pagination_selector,
+                entity_selector=entity_sel,
+                link_selector=link_sel,
             )
             if err:
                 errors.append(f"{page_url}: {err}")
