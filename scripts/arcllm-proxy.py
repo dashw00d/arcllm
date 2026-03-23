@@ -44,14 +44,18 @@ SYCL_ENV = {
 MODELS = {}
 
 
-def _register(name, path, flags, aliases=None):
+def _register(name, path, flags, aliases=None, server_bin=None):
     # Parse -np from flags to know how many slots this model has
     n_parallel = 1
     parts = flags.split()
     for i, p in enumerate(parts):
         if p == "-np" and i + 1 < len(parts):
             n_parallel = int(parts[i + 1])
-    entry = {"name": name, "path": str(path), "flags": flags, "aliases": aliases or [], "n_parallel": n_parallel}
+    entry = {
+        "name": name, "path": str(path), "flags": flags,
+        "aliases": aliases or [], "n_parallel": n_parallel,
+        "server_bin": str(server_bin) if server_bin else None,
+    }
     MODELS[name] = entry
     for a in entry["aliases"]:
         MODELS[a] = entry
@@ -81,18 +85,52 @@ _register(
     aliases=["qwen3-32b-think", "qwen3-32b-reasoning"],
 )
 
-# ── Qwen3-30B-A3B MoE ───────────────────────────────────────────────────
-# Abliterated model — fast MoE but outputs thinking as plain text (no <think> tags).
-# Use for churning (short outputs where thinking leak doesn't matter).
-# np=4 c=8192 → 2048 tokens/slot. -fa off: IGC crashes on MoE + flash attention.
+# ── Qwen3-30B-A3B MoE (PIPELINE FLAGSHIP) ────────────────────────────────
+# 20.7 t/s at np=16 c=24576 (test_moe_pipeline.py). No Q8_1 concurrent bug.
+# Model is 17.3 GB → ~30.7 GB free for KV. 1536 tok/slot covers all pipeline
+# stages (triage ~1000, patterning ~800, discovery agent ~1500 after compaction).
+# -fa off: IGC crashes on MoE + flash attention.
+# FUSED_MMQ: zero benefit on MoE (expert FFNs too small at 768-dim).
+# VRAM ceiling: c=32k OOMs at np=16. c=24k is the sweet spot.
 _register(
     "qwen3-30b-moe",
     ROOT / "models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf",
     f"--split-mode layer -ngl 99 --tensor-split 1,1,1"
-    f" -c 8192 -fa off"
-    f" -np 4 --no-warmup --slot-save-path {SLOT_CACHE}"
+    f" -c 24576 -fa off"
+    f" -np 16 --no-warmup --slot-save-path {SLOT_CACHE}"
     f" --reasoning-budget 0",
     aliases=["qwen3-30b", "30b-moe", "moe"],
+)
+
+# ── Qwen3.5-35B-A3B (DeltaNet MoE, uses fused GDN kernel) ──────────────
+# Requires llm-stack-35 build with fused GDN SYCL kernel + seq_rm cache fix.
+# np=4 c=32768 → 8192 tokens/slot. -fa off: IGC crashes on MoE + FA.
+# Prompt cache: working after seq_rm fix. 3.4x prompt speedup on reuse.
+_register(
+    "qwen35",
+    ROOT / "models/Qwen/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-GGUF/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+    f"--split-mode layer -ngl 999 --tensor-split 1,1,1"
+    f" -c 49152 -b 256 -fa off"
+    f" -np 4 --no-warmup"
+    f" --slot-save-path {SLOT_CACHE}",
+    aliases=["qwen3.5-35b", "35b", "qwen35-35b"],
+    server_bin=Path("/home/ryan/llm-stack/bin/llama-server-qwen35-gdn"),
+)
+
+# ── Qwen3.5-122B-A10B (DeltaNet MoE, expert offload via -ncmoe 40) ────────
+# 70GB Q4_K_M → experts on CPU (DDR4-bound), non-expert on GPU.
+# -ncmoe 40: layers 40-47 experts on GPU2 for +17% over full -cmoe.
+# np=4 c=32768 → 8192 tokens/slot. ~6.9 t/s gen, prompt cache working.
+_register(
+    "qwen35-122b",
+    ROOT / "models/Qwen/Qwen3.5-122B-A10B-HauhauCS-GGUF/Qwen3.5-122B-A10B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+    f"--split-mode layer -ngl 999"
+    f" -c 32768 -fa off"
+    f" -np 4 -ncmoe 40 --no-warmup"
+    f" --slot-save-path {SLOT_CACHE}"
+    f" --reasoning-budget 0",
+    aliases=["qwen3.5-122b", "122b", "super-henry"],
+    server_bin=Path("/home/ryan/llm-stack/bin/llama-server-qwen35-122b"),
 )
 
 # ── Backend Manager ────────────────────────────────────────────────────────
@@ -184,7 +222,13 @@ class BackendManager:
             self._stop_backend_locked()
             ok = self._start_backend_locked(entry, timeout)
             if ok:
-                gate.set_max_active(entry.get("n_parallel", 1))
+                # Q8_1 buffer race in ggml_sycl_op_mul_mat crashes Qwen3.5-35B
+                # at 2+ concurrent slots. Pure transformer models (30B MoE, 32B
+                # dense) are fine at full concurrency. See test_qwen35_np.py.
+                if canonical in ("qwen35", "qwen35-122b"):
+                    gate.set_max_active(1)
+                else:
+                    gate.set_max_active(entry["n_parallel"])
             return ok
 
     def _start_backend_locked(self, entry: dict, timeout: float) -> bool:
@@ -196,8 +240,9 @@ class BackendManager:
         canonical = entry["name"]
         flags = entry["flags"]
 
+        server_bin = entry.get("server_bin") or str(LLAMA_SERVER)
         cmd = [
-            str(LLAMA_SERVER),
+            server_bin,
             "--model", model_path,
             "--host", "127.0.0.1",
             "--port", str(BACKEND_PORT),
@@ -238,13 +283,22 @@ class BackendManager:
                 body = json.loads(resp.read())
                 conn.close()
                 if body.get("status") == "ok":
-                    log.info("Model %s ready", canonical)
-                    # Save compiler cache only after a confirmed healthy startup.
-                    _cache_save()
-                    self._compiler_cache_healthy = True
-                    self._slot_restore(canonical, entry.get("n_parallel", 1))
-                    self._start_idle_watcher()
-                    return True
+                    log.info("Model %s health OK — running canary check", canonical)
+                    if self._canary_check():
+                        log.info("Canary PASSED — model %s is coherent", canonical)
+                        _cache_save()
+                        self._compiler_cache_healthy = True
+                        self._slot_restore(canonical, entry.get("n_parallel", 1))
+                        # Re-verify after slot restore (restored KV could be corrupted)
+                        if not self._canary_check():
+                            log.error("Canary FAILED after slot restore — clearing slot cache")
+                            self._clear_slot_cache(canonical)
+                        self._start_idle_watcher()
+                        return True
+                    else:
+                        log.error("Canary FAILED — model producing garbled output, attempting recovery")
+                        self._recover_from_corruption(canonical, entry)
+                        return False
             except Exception:
                 pass
             time.sleep(2)
@@ -333,6 +387,107 @@ class BackendManager:
         log.info("Restored %d/%d slots for %s", restored, n_parallel, model_name)
         return restored > 0
 
+    def _canary_check(self) -> bool:
+        """Generate test tokens and verify output is coherent (not garbled).
+
+        Abliterated models (qwen3-30b-moe) leak thinking as plain text —
+        they may output "Okay, the user is asking..." before "4". So we use
+        more tokens and check for coherence (ASCII ratio) as the primary signal,
+        with "4" as a secondary check.
+        """
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", BACKEND_PORT, timeout=60)
+            body = json.dumps({
+                "messages": [{"role": "user", "content": "What is 2+2? Reply with just the number."}],
+                "max_tokens": 100,  # enough for thinking leak + answer
+                "temperature": 0,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }).encode()
+            conn.request("POST", "/v1/chat/completions", body=body,
+                         headers={"Content-Type": "application/json", "Content-Length": str(len(body))})
+            resp = conn.getresponse()
+            data = json.loads(resp.read())
+            conn.close()
+
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if not content:
+                log.warning("Canary: empty content")
+                return False
+
+            # Primary check: mostly ASCII (garbled output = unicode soup / random bytes)
+            ascii_ratio = sum(1 for c in content if ord(c) < 128) / max(len(content), 1)
+            if ascii_ratio < 0.7:
+                log.error("Canary FAILED (garbled): content=%r ascii_ratio=%.2f", content[:100], ascii_ratio)
+                return False
+
+            # Secondary check: "4" should appear somewhere (even after thinking leak)
+            if "4" not in content:
+                log.warning("Canary WARN: '4' not found but ASCII OK — content=%r", content[:100])
+                # Still pass — coherent English without "4" is not corruption
+            return True
+        except Exception as e:
+            log.error("Canary error: %s", e)
+            return False
+
+    def _clear_slot_cache(self, model_name: str):
+        """Delete all slot cache files for a model."""
+        cleared = 0
+        for f in Path(SLOT_CACHE).glob(f"{model_name}*"):
+            f.unlink(missing_ok=True)
+            cleared += 1
+        if cleared:
+            log.info("Cleared %d slot cache files for %s", cleared, model_name)
+
+    def _driver_rebind_gpus(self):
+        """Unbind/rebind i915 driver to force L0 rediscovery."""
+        i915 = Path("/sys/bus/pci/drivers/i915")
+        pci_addrs = sorted(
+            str(p.resolve().parent.name)
+            for p in Path("/sys/class/drm").glob("card*/device/reset")
+        )
+        for addr in pci_addrs:
+            try:
+                (i915 / "unbind").write_text(addr)
+            except Exception:
+                pass
+        time.sleep(2)
+        for addr in pci_addrs:
+            try:
+                (i915 / "bind").write_text(addr)
+            except Exception:
+                pass
+        time.sleep(3)
+        log.info("GPU driver rebind complete (%d devices)", len(pci_addrs))
+
+    def _recover_from_corruption(self, model_name: str, entry: dict):
+        """Full corruption recovery: kill → flush caches → rebind GPUs."""
+        log.error("Starting corruption recovery for %s", model_name)
+        if self.process and self.process.poll() is None:
+            self.process.kill()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        self.process = None
+
+        # Flush all caches
+        for d in [Path("/tmp/neo_compiler_cache"), Path("/tmp/opencl_cache"),
+                   Path.home() / ".cache" / "neo_compiler_cache"]:
+            if d.exists():
+                subprocess.run(["rm", "-rf", str(d)], capture_output=True)
+        log.info("Flushed L0 compiler caches")
+
+        # Delete corrupted slot cache
+        self._clear_slot_cache(model_name)
+
+        # GPU driver rebind
+        self._hw_reset_gpus()
+        time.sleep(3)
+        self._driver_rebind_gpus()
+
+        self._compiler_cache_healthy = False
+        log.error("Recovery complete — will recompile JIT on next startup (~90s)")
+
     @staticmethod
     def _hw_reset_gpus():
         """Hardware-level GPU reset via sysfs after DEVICE_LOST."""
@@ -349,14 +504,16 @@ class BackendManager:
     def _stop_backend_locked(self):
         crashed = self.process and self.process.poll() is not None
         if self.process and self.process.poll() is None:
-            # Save KV cache before stopping
-            if self.current_model:
-                self._slot_save(self.current_model)
-            # Save compiler cache only after a known-healthy startup.
-            if self._compiler_cache_healthy:
-                _cache_save()
+            # Canary check before saving — don't persist corruption
+            if self.current_model and self._compiler_cache_healthy:
+                if self._canary_check():
+                    self._slot_save(self.current_model)
+                    _cache_save()
+                else:
+                    log.error("Canary failed on shutdown — NOT saving caches (possible corruption)")
+                    self._clear_slot_cache(self.current_model)
             else:
-                log.info("Skipping compiler cache save for %s; startup never reached healthy state", self.current_model)
+                log.info("Skipping cache save for %s (not marked healthy)", self.current_model)
             log.info("Stopping llama-server (PID %d, model %s)", self.process.pid, self.current_model)
             self.process.terminate()
             try:

@@ -2,141 +2,149 @@
 
 3x Intel Arc A770 (48GB VRAM), i9-7900X, 64GB RAM.
 
-## Current State
-
-**Flagship:** `llama.cpp-stable` (branch: `stable-baseline`) — the working build.  
-**EP experiment:** `llama.cpp-eptp` (branch: `ep-tp-combined`) — EP implementation, currently has WIP debug instrumentation, needs clean rebase before next EP work.
-
-## Performance Baseline
-
-| Config | Result | Notes |
-|--------|--------|-------|
-| Qwen3-30B-A3B ablit, layer-split, np=16 | **25.7 t/s** | Current flagship result |
-| Qwen3-32B Q4_K_M, tensor-split, np=16, FUSED_MMQ=1 | **21.7 t/s** | Dense model |
-| Qwen3-32B Q4_K_M, tensor-split, np=16, FUSED_MMQ=0 | **17.7 t/s** | Stable build (FUSED_MMQ not yet ported) |
-| MoE 2.7B, single GPU, np=1 | **20.7 t/s** | Fast iteration model |
-| Q8_0, any np | ~3.3 t/s | Bandwidth-bound, not worth optimizing |
-
-## Worktrees
-
-| Dir | Branch | Purpose |
-|-----|--------|---------|
-| `llama.cpp-stable/` | `stable-baseline` | **FLAGSHIP** — all working optimizations, bench framework docs |
-| `llama.cpp-eptp/` | `ep-tp-combined` | EP experiment — SPLIT_AXIS_2, EP dispatch, needs rebase |
-| `llama.cpp/` | `master` | Upstream tracking (row-split Nemotron experiments) |
-
-## Models
-
-**DO NOT use `Qwen3-30B-A3B-REAM-heretic-i1`** — garbled output on all builds. Quantization/merge issue, not an EP bug.
-
-| Model | Path | Status |
-|-------|------|--------|
-| Qwen3-30B-A3B-abliterated Q4_K_M | `models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf` | ✅ Works, 128 experts |
-| Qwen3-32B Q4_K_M | `models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf` | ✅ Works, dense |
-| Qwen1.5-MoE-A2.7B Q2_K | `models/Qwen/Qwen1.5-MoE-A2.7B-Chat-GGUF/Qwen1.5-MoE-A2.7B-Chat.Q2_K.gguf` | ✅ Works, fast iteration |
-| Qwen3-30B-A3B-REAM-heretic-i1 | `models/Qwen/Qwen3-30B-A3B-REAM-heretic-i1-GGUF/` | ❌ Broken, deleted |
-
-## Build
+## Quick Start
 
 ```bash
-# Flagship build (use this)
-cd /home/ryan/llm-stack/llama.cpp-stable
-source ../env.sglang-xpu.sh
-cd build-sycl && cmake --build . --target llama-server -j$(nproc)
-
-# EP build
-cd /home/ryan/llm-stack/llama.cpp-eptp
-source ../env.sglang-xpu.sh
-cd build-sycl && cmake --build . --target llama-server -j$(nproc)
+source /home/ryan/llm-stack/env.sglang-xpu.sh   # always first
+bash scripts/arcllm-server.sh start              # start proxy
+bash scripts/arcllm-server.sh load qwen3-32b     # load a model
+bash scripts/arcllm-server.sh dashboard          # full status
+bash scripts/arcllm-server.sh canary             # verify output is coherent
 ```
 
-`llama.cpp/build-sycl` symlinks to `llama.cpp-stable/build-sycl` — the bench framework uses it.
+## Models — When to Use What
 
-## Benchmark Framework — MANDATORY for all GPU/model/server testing
+| Model | Speed | np | Use For | Limitation |
+|-------|-------|-----|---------|------------|
+| **Qwen3-32B** (dense) | 17-21 t/s | 16 | Pipeline (JSON, tools, structured output) | Slower than MoE |
+| **Qwen3-30B-A3B** (MoE) | 20-25 t/s | 16 | Discord chat, unstructured tasks | Can't produce JSON (abliterated, leaks thinking) |
+| **Qwen3.5-35B** | 13 t/s | 4 serialized | Best quality, Discord | Q8_1 concurrent bug — np>1 crashes |
 
-**NEVER run raw bash/curl commands to test llama-server configs.** Use `scripts/bench/`. This is not optional.
+**Proxy model names:** `qwen3-32b`, `qwen3-30b-moe`, `qwen35`, `qwen35-122b`
 
-Raw bash testing caused cascading failures: crashed GPUs left in DEVICE_LOST, no GPU utilization data, no records of what was tested.
+## Operations — arcllm-server.sh
+
+```bash
+# Server
+start / stop / restart / status / logs / models / load <model> / unload
+
+# Health
+canary          # Verify output coherence (2+2=4 check)
+dashboard       # Full system: GPU temps, model, queue, cache
+
+# GPU Recovery (escalating severity)
+gpu-check       # Verify 3/3 GPUs visible
+gpu-reset       # Sysfs reset + i915 driver rebind
+gpu-nuke        # PCI remove+rescan (LAST RESORT — can lose a GPU until reboot)
+
+# Cache
+cache-status    # Show JIT + slot cache sizes
+cache-flush     # Clear all caches
+
+# Full recovery
+recover         # stop → flush → nuke → start → canary
+```
+
+## Benchmark Framework — MANDATORY
+
+**NEVER use raw curl/bash to test server configs.** Use `scripts/bench/`.
 
 ```bash
 cd /home/ryan/llm-stack/scripts
-python3 -m bench help                       # list all suites and tests
-python3 -m bench frontier                   # regression baseline (21.7 t/s)
-python3 -m bench moefrontier.np16           # MoE baseline (25.7 t/s)
-python3 -m bench thinking.1x_1024tok        # specific test
+python3 -m bench help                       # list all suites
+python3 -m bench frontier                   # regression baseline
+python3 -m bench moepipeline.np16_c24k      # specific test
 ```
 
-The framework: acquires `render` group, sources env, resets GPUs between tests, captures GPU freq/power/temp, saves JSON to `/tmp/bench_results.json`.
+GPU reset between tests uses `sudo` (passwordless via `/etc/sudoers.d/gpu-reset`).
+Results saved to `/tmp/bench_results.json`. Test docstrings ARE the docs.
 
-### Adding tests
+### Key Suites
 
-Create `scripts/bench/tests/test_<name>.py`. The module docstring IS the documentation — update it as you run tests. No separate markdown docs for GPU/SYCL issues.
+| Suite | What It Tests |
+|-------|---------------|
+| `frontier` | 32B dense baseline (21.7 t/s FUSED_MMQ) |
+| `moefrontier` | 30B MoE baseline (25.7 t/s np=16) |
+| `moepipeline` | MoE context × concurrency for pipeline |
+| `densepipeline` | 32B context × concurrency for pipeline |
+| `qwen35np` | Qwen3.5-35B Q8_1 concurrent crash investigation |
+| `moechurn` | MoE data-churning optimization |
+
+### Adding Tests
 
 ```python
-"""One-line description.
-
-## Context / Results / Relevant Files
-...
-"""
+"""One-line description. Docstring IS the documentation."""
 from bench.base import BenchTest
 from bench.config import BenchConfig
 
 class TestName(BenchTest):
     base = BenchConfig(model="q4km", n_parallel=4, concurrent=4)
-
     def test_the_thing(self):
-        self.run(self.base.with_(name="descriptive_name", disable_graph=True))
+        self.run(self.base.with_(name="descriptive_name"))
 ```
 
-### Config levers (scripts/bench/config.py)
+## Data Pipeline (arc-tools/)
 
-- Server: `model`, `split_mode`, `n_parallel`, `context`, `batch`, `flash_attn`, `kv_quant`
-- SYCL env: `disable_graph`, `immediate_cmdlists`, `affinity`
-- Experimental: `.with_flags(FUSED_MMQ="1")` for A/B env var testing
-- Test: `concurrent`, `max_tokens`, `prompt`, `timeout`
+**Flow:** prospect search → site auditor → grabber → churner → golden entities
 
-## Environment
+| Tool | Purpose | Model |
+|------|---------|-------|
+| **Site Auditor** | Browse + pattern websites (4-stage: triage → discovery → patterning → extraction) | qwen3-32b (needs JSON) |
+| **Grabber** | Apply patterns at scale on Vultr fleet (no LLM during scaling) | — |
+| **Churner** | DOM chunks → structured entities, cross-site dedup | qwen3-32b |
+| **Discord Bot** | Chat interface | qwen3-30b-moe or qwen35 |
 
 ```bash
-source /home/ryan/llm-stack/env.sglang-xpu.sh   # always first
+# Run site auditor
+cd arc-tools/site-auditor
+HENRY_MODEL=qwen3-32b python3 auditor.py --url https://example.com --entity-type "wedding venues"
+
+# Docker stack (db, temporal, discord, grabber)
+cd arc-tools && docker compose up -d
 ```
 
-- User must be in `render` group for GPU access
-- `SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0` (batched) — +7.5% throughput
-- `GGML_SYCL_DISABLE_GRAPH=1` — safer; `=0` untested at long sequences
-- **IGC crashes on MoE + flash attention** — always use `flash_attn=False` for MoE tests
-- GPU card0 can go missing after hard resets — reboot restores it
+State in Postgres (ghostgraph DB): `sites`, `entity_audits`, `page_scans`, `url_patterns`, `dom_patterns`.
 
-## Known Issues / Anti-Patterns
+## Known Bugs
 
-- FUSED_MMQ not ported to stable build — MoE gets 25.7 t/s without it; dense loses ~4 t/s
-- EP (tensor-split) crashes in stable build — EP code only in `llama.cpp-eptp`
-- Don't trust `--split-mode tensor` in stable for MoE (GGML_ASSERT on split_state)
-- 128 experts ÷ 3 GPUs doesn't divide cleanly — EP needs padding/masking logic for abliterated model
-- REAM-heretic-i1 looks like an EP bug but isn't — it's broken on all builds
+- **Q8_1 concurrent crash** — Qwen3.5-35B only, 2+ simultaneous slots. Proxy serializes with `max_active=1`. See `test_qwen35_np.py`.
+- **MoE + flash attention** — IGC crash. Always `-fa off` for MoE.
+- **GPU card0 disappears** after PCI nuke — only reboot restores it. Don't auto-nuke.
+- **FUSED_MMQ unstable** after repeated GPU crashes — works clean, fails after crash cascades.
 
-## Next Priorities
+## Build
 
-1. **Port FUSED_MMQ to stable** — recover 4 t/s on dense, probably free on MoE too
-2. **EP on abliterated model** — fix 128÷3 unequal split (padding/masking in meta backend)
-3. **N-gram speculative decoding** — zero-cost test, potentially +15%
-4. **Fused expert aggregation kernel** — designed, not built, estimated -55ms/token
+```bash
+cd /home/ryan/llm-stack/llama.cpp-stable && source ../env.sglang-xpu.sh
+cd build-sycl && cmake --build . --target llama-server -j$(nproc)
+```
 
-## Project Layout
+`llama.cpp/build-sycl` symlinks to `llama.cpp-stable/build-sycl`.
+
+## SYCL Environment
+
+- `SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0` — batched mode, +7.5%
+- `GGML_SYCL_DISABLE_GRAPH=1` — safer, graph replay bugged on DG2
+- `GGML_SYCL_FUSED_MMQ=1` — +25% on dense models at np=16 (no benefit on MoE)
+
+## Layout
 
 ```
 llm-stack/
 ├── CLAUDE.md                   ← This file
-├── env.sglang-xpu.sh           ← Always source this first
-├── llama.cpp-stable/           ← FLAGSHIP worktree
-│   ├── build-sycl/             ← Working binary
-│   └── docs/                   ← ROADMAP, TECHNIQUES, EP-DEBUG, etc.
-├── llama.cpp-eptp/             ← EP experiment worktree
-├── llama.cpp/                  ← Upstream tracking (master)
-├── models/                     ← GGUF model files
+├── env.sglang-xpu.sh           ← Source first
 ├── scripts/
-│   ├── bench/                  ← Python benchmark framework
-│   ├── arcllm-proxy.py         ← Lazy-loading reverse proxy
-│   └── arcllm-server.sh        ← Start/stop wrapper
-└── cache/                      ← L0 compiler cache, KV slot saves
+│   ├── arcllm-proxy.py         ← Lazy-loading reverse proxy (port 11435)
+│   ├── arcllm-server.sh        ← Operations toolkit
+│   └── bench/                  ← Benchmark framework
+├── arc-tools/
+│   ├── site-auditor/           ← Henry-powered site analysis
+│   ├── grabber/                ← Scale scraping (Temporal)
+│   └── docker-compose.yml      ← Full stack
+├── llama.cpp-stable/           ← Flagship build (stable-baseline)
+├── llama.cpp-eptp/             ← EP experiment (ep-tp-combined)
+├── llama.cpp/                  ← Upstream tracking (build-sycl → stable symlink)
+├── bin/                        ← Frozen binaries (qwen35-gdn, 122b)
+├── models/                     ← GGUF files
+└── cache/                      ← L0 JIT cache, KV slot saves
 ```

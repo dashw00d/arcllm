@@ -1,0 +1,174 @@
+{
+  "domain": "www.bing.com",
+  "page_type": "maps_overlay",
+  "author": "human",
+  "description": "Bing Maps overlay endpoint — two-phase extraction. Phase 1 (discovery): category query + count=10, returns 10 venues with 14 fields. Phase 2 (detail): specific venue query + count=1, returns full detail with 22 fields including reviews, hours, social media.",
+  "recipes": {
+    "discovery": {
+      "type": "endpoint",
+      "description": "Category search returning 10 venue cards with basic info (~147KB)",
+      "endpoint": {
+        "base_url": "https://www.bing.com",
+        "url_template": "/maps/overlaybfpr?q={query}&cp={lat}~{lng}&count={count}",
+        "method": "GET",
+        "headers": {
+          "Referer": "https://www.bing.com/maps",
+          "Accept": "text/html",
+          "X-Search-Location": "lat:{lat};long:{lng};re:50"
+        }
+      },
+      "parser": {
+        "strategy": "data_attribute",
+        "attribute": "data-entity",
+        "fallbacks": [
+          {"strategy": "data_attribute", "attribute": "data-bm"},
+          {"strategy": "css", "container": ".b_scard"},
+          {"strategy": "css", "container": "#taskPaneBody .b_entityTP"}
+        ]
+      },
+      "fields": [
+        {"name": "name", "path": "entity.title", "fallback": "entity.name"},
+        {"name": "address", "path": "entity.address"},
+        {"name": "phone", "path": "entity.phone", "fallback": "entity.telephone"},
+        {"name": "website", "path": "entity.website", "fallback": "entity.url"},
+        {"name": "category", "path": "entity.primaryCategoryName"},
+        {"name": "style_category", "path": "entity.primaryStyleCategory"},
+        {"name": "ypid", "path": "entity.id"},
+        {"name": "image_url", "path": "entity.imageUrl"},
+        {"name": "latitude", "path": "geometry.y"},
+        {"name": "longitude", "path": "geometry.x"}
+      ],
+      "post_parse": [
+        {
+          "source": "factrow",
+          "selector": ".b_factrow",
+          "scope": "entity_element",
+          "extractions": [
+            {"name": "rating", "regex": "(\\d\\.?\\d?)\\s*/\\s*5.*?\\((\\d[\\d,]*)\\)", "groups": {"rating": 1, "review_count": 2}},
+            {"name": "hours_status", "regex": "(Open|Closed)\\s*[·•.\\-]?\\s*(.*)", "groups": {"hours_status": 1, "hours_detail": 2}}
+          ]
+        }
+      ],
+      "pagination": {
+        "signal": "data-hasmoreresults",
+        "param": "first",
+        "offset_type": "0-indexed"
+      }
+    },
+    "detail": {
+      "type": "endpoint",
+      "description": "Single venue detail panel with reviews, hours, description, social (~330KB)",
+      "endpoint": {
+        "base_url": "https://www.bing.com",
+        "url_template": "/maps/overlaybfpr?q={venue_name}+{city}+{state}&cp={lat}~{lng}&count=1",
+        "method": "GET",
+        "headers": {
+          "Referer": "https://www.bing.com/maps",
+          "Accept": "text/html",
+          "X-Search-Location": "lat:{lat};long:{lng};re:50"
+        }
+      },
+      "parser": {
+        "strategy": "composite",
+        "sources": [
+          {
+            "name": "entity",
+            "strategy": "data_attribute",
+            "attribute": "data-entity",
+            "fields": [
+              {"name": "name", "path": "entity.title"},
+              {"name": "address", "path": "entity.address"},
+              {"name": "phone", "path": "entity.phone"},
+              {"name": "website", "path": "entity.website"},
+              {"name": "category", "path": "entity.primaryCategoryName"},
+              {"name": "style_category", "path": "entity.primaryStyleCategory"},
+              {"name": "ypid", "path": "entity.id"},
+              {"name": "image_url", "path": "entity.imageUrl"},
+              {"name": "latitude", "path": "geometry.y"},
+              {"name": "longitude", "path": "geometry.x"}
+            ]
+          },
+          {
+            "name": "reviews",
+            "strategy": "html_attribute_json",
+            "selector": ".reviews_rct",
+            "attribute": "revdata",
+            "fields": [
+              {"name": "rating", "path": "Provider.AverageRating"},
+              {"name": "review_count", "path": "Provider.ReviewCount"},
+              {"name": "review_source", "path": "Provider.Name"},
+              {"name": "review_source_url", "path": "Provider.Link.Url"},
+              {"name": "all_reviews_url", "path": "SeeAll.Url"},
+              {"name": "reviews", "path": "Reviews.Values", "field_type": "nested_list",
+                "sub_fields": [
+                  {"name": "text", "path": "Text"},
+                  {"name": "author", "path": "Rating.ReviewerName"},
+                  {"name": "date", "path": "Rating.ReviewTimeStamp"},
+                  {"name": "rating", "path": "Rating.ReviewRating", "transform": "divide_by_2"},
+                  {"name": "source", "path": "Rating.ProviderName"},
+                  {"name": "full_review_url", "path": "FullReviewLink.Url"}
+                ]
+              }
+            ]
+          },
+          {
+            "name": "description",
+            "strategy": "css_text",
+            "selector": ".ed_entity_desc, .b_snippet_expansion",
+            "field_name": "description"
+          },
+          {
+            "name": "hours",
+            "strategy": "css_text_regex",
+            "selector": ".opHours",
+            "regex": "(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\\s*(\\d{1,2}(?::\\d{2})?\\s*(?:AM|PM)\\s*-\\s*\\d{1,2}(?::\\d{2})?\\s*(?:AM|PM)|Closed)",
+            "field_name": "hours",
+            "field_type": "key_value"
+          },
+          {
+            "name": "social",
+            "strategy": "css_links",
+            "selector": ".socialProfile a[href]",
+            "field_name": "social_media",
+            "field_type": "key_value",
+            "key_source": "text",
+            "value_source": "href"
+          },
+          {
+            "name": "address_structured",
+            "strategy": "data_attribute_json",
+            "attribute": "data-facts",
+            "fields": [
+              {"name": "street", "path": "addressFields.addressLine"},
+              {"name": "city", "path": "addressFields.city"},
+              {"name": "state", "path": "addressFields.stateMunicipality"},
+              {"name": "zip", "path": "addressFields.postalCode"}
+            ],
+            "nest_under": "address_structured"
+          },
+          {
+            "name": "photos",
+            "strategy": "css_attribute_list",
+            "selector": "img[src*='bing.com/th']",
+            "attribute": "src",
+            "filter": "OLC.",
+            "field_name": "photos"
+          }
+        ]
+      }
+    }
+  },
+  "notes": [
+    "Same endpoint, two modes: count=10 (discovery) vs count=1 (detail)",
+    "Discovery: ~147KB, 10 venues, 14 fields — category query",
+    "Detail: ~330KB, 1 venue, 22 fields — specific name query",
+    "revdata JSON attribute on .reviews_rct has fully structured reviews (text, author, date, rating, source, full_review_url)",
+    "ReviewRating is 0-10 scale, divide by 2 for 5-star",
+    "reqbaseurl on .reviews_rct has /local/mprreviewsdata endpoint for more reviews",
+    ".opHours contains structured day-by-day hours as text",
+    ".socialProfile has <a> links to Facebook, X, Instagram, Pinterest",
+    "data-facts JSON has parsed address fields (street, city, state, zip)",
+    "Factrows are CHILDREN of the <a> data-entity element, not siblings",
+    "data-hasmoreresults signals pagination availability in discovery mode"
+  ]
+}

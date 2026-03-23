@@ -86,48 +86,55 @@ class BenchRunner:
                            capture_output=True)
 
     @staticmethod
+    def _report_vram():
+        """Print per-GPU VRAM usage via xpu-smi. Warns if VRAM isn't clean."""
+        from bench.monitor import gpu_vram_mib
+        vram = gpu_vram_mib()
+        if vram:
+            parts = [f"GPU{i}:{v:.0f}M" for i, v in enumerate(vram)]
+            dirty = any(v > 100 for v in vram)
+            status = " ⚠ VRAM not clean!" if dirty else ""
+            print(f"  GPUs ready  VRAM: {' '.join(parts)}{status}")
+        else:
+            print("  GPUs ready")
+
+    @staticmethod
+    def _sudo_write(path: str, value: str):
+        """Write a value to a sysfs file via sudo. Non-fatal on timeout —
+        sysfs reset can block when GPUs are already clean."""
+        try:
+            subprocess.run(
+                f"echo {value} | sudo -n tee {path} >/dev/null",
+                shell=True, capture_output=True, timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            pass  # sysfs write blocked — GPU may already be clean
+
+    @staticmethod
     def _hw_reset_gpus():
-        """Hardware-level GPU reset via sysfs.
-
-        Writing '1' to /sys/class/drm/cardN/device/reset triggers an i915
-        GPU engine reset. This clears DEVICE_LOST state, flushes command
-        queues, and resets the Level Zero runtime's view of the device.
-
-        Without this, a DEVICE_LOST crash can leave the GPU in a degraded
-        state where sycl-ls still sees it but kernels silently produce
-        garbage or immediately fail.
-        """
+        """Hardware-level GPU reset via sysfs."""
         for p in GPU_RESET_PATHS:
-            try:
-                p.write_text("1")
-            except PermissionError:
-                # Needs root or specific udev rules. Log but don't fail.
-                pass
-            except Exception:
-                pass
+            BenchRunner._sudo_write(str(p), "1")
 
     @staticmethod
     def _driver_rebind_gpus():
-        """Unbind/rebind i915 driver as fallback when sysfs reset doesn't
-        restore Level Zero visibility.
-
-        After a hard crash (e.g. DEVICE_LOST with zombie process holding
-        L0 handles), the sysfs reset can succeed at the hardware level but
-        Level Zero still sees 0 platforms. Unbinding and rebinding the i915
-        driver forces L0 to rediscover the devices.
-        """
+        """Unbind/rebind i915 driver as fallback when sysfs reset fails."""
         i915_path = Path("/sys/bus/pci/drivers/i915")
         for addr in GPU_PCI_ADDRS:
-            try:
-                (i915_path / "unbind").write_text(addr)
-            except Exception:
-                pass
+            BenchRunner._sudo_write(str(i915_path / "unbind"), addr)
         time.sleep(2)
         for addr in GPU_PCI_ADDRS:
-            try:
-                (i915_path / "bind").write_text(addr)
-            except Exception:
-                pass
+            BenchRunner._sudo_write(str(i915_path / "bind"), addr)
+
+    @staticmethod
+    def _pci_nuke_gpus():
+        """PCI remove + rescan — nuclear option when rebind fails."""
+        print("  PCI remove+rescan (nuclear recovery)...")
+        for addr in GPU_PCI_ADDRS:
+            BenchRunner._sudo_write(f"/sys/bus/pci/devices/{addr}/remove", "1")
+        time.sleep(3)
+        BenchRunner._sudo_write("/sys/bus/pci/rescan", "1")
+        time.sleep(10)
 
     # Persistent JIT cache — survives DEVICE_LOST crash + GPU reset.
     _JIT_CACHE_BACKUP = Path("/home/ryan/llm-stack/cache/neo_compiler_cache")
@@ -215,7 +222,7 @@ class BenchRunner:
         # 4. Verify GPUs are responsive.
         for attempt in range(3):
             if self.check_gpus():
-                print("  GPUs ready")
+                self._report_vram()
                 return True
             print(f"  GPUs not ready, waiting ({attempt + 1}/3)...")
             time.sleep(10)
@@ -226,11 +233,15 @@ class BenchRunner:
         time.sleep(5)
         for attempt in range(3):
             if self.check_gpus():
-                print("  GPUs ready (after driver rebind)")
+                self._report_vram()
                 return True
             time.sleep(5)
 
+        # 6. PCI nuke is too risky for automatic recovery — can lose a GPU
+        # that only comes back on reboot. Left as manual-only:
+        #   arcllm-server.sh gpu-nuke
         print("  WARNING: GPUs not responding after reset + rebind")
+        print("  Try manually: arcllm-server.sh gpu-nuke (or reboot)")
         return False
 
     # ── Server lifecycle ──────────────────────────────────────────────

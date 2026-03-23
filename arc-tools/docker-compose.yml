@@ -1,24 +1,5 @@
 services:
-  temporal:
-    image: temporalio/auto-setup:latest
-    ports:
-      - "7233:7233"
-    environment:
-      - DB=postgres12
-      - DB_PORT=5432
-      - POSTGRES_USER=temporal
-      - POSTGRES_PWD=temporal
-      - POSTGRES_SEEDS=db
-    depends_on:
-      - db
-
-  temporal-ui:
-    image: temporalio/ui:latest
-    ports:
-      - "8233:8080"
-    environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-
+  # ── Shared Infrastructure ──────────────────────────────────────────────
   db:
     image: pgvector/pgvector:pg16
     environment:
@@ -30,7 +11,61 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/00-init-db.sh
       - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    restart: unless-stopped
 
+  redis:
+    image: redis:8-alpine
+    command: >
+      redis-server
+      --maxmemory 4gb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    restart: unless-stopped
+
+  # ── Temporal (churner orchestration) ───────────────────────────────────
+  temporal:
+    image: temporalio/auto-setup:latest
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=db
+    depends_on:
+      db:
+        condition: service_healthy
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    ports:
+      - "8233:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+
+  # ── Churner Workers ────────────────────────────────────────────────────
   worker-fast:
     build: ./churner
     command: python worker.py fast
@@ -61,6 +96,7 @@ services:
       - temporal
       - db
 
+  # ── Discord Bot (Henry) ────────────────────────────────────────────────
   discord-bot:
     build: ./discord-bot
     extra_hosts:
@@ -68,9 +104,52 @@ services:
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - LLAMA_SERVER_URL=http://host.docker.internal:11435
-      - MODEL=default
+      - MODEL=qwen35
     depends_on:
       - temporal
+
+  # ── Grabber API (web scraping intelligence) ─────────────────────────────
+  grabber-api:
+    build:
+      context: ./grabber
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://temporal:temporal@db:5432/ghostgraph
+      - HENRY_URL=http://host.docker.internal:11435/v1/chat/completions
+      - HENRY_MODEL=qwen35
+      - API_REQUIRE_KEYS=false
+      - VULTR_API_KEY=${VULTR_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Grabber Worker (Temporal) ────────────────────────────────────────────
+  grabber-worker:
+    build:
+      context: ./grabber
+      dockerfile: Dockerfile
+    command: python temporal_worker.py
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - REDIS_URL=redis://redis:6379
+      - POSTGRES_URL=postgresql://temporal:temporal@db:5432/ghostgraph
+      - HENRY_URL=http://host.docker.internal:11435/v1/chat/completions
+      - HENRY_MODEL=qwen35
+    depends_on:
+      - temporal
+      - db
+      - redis
+    restart: unless-stopped
 
 volumes:
   pgdata:

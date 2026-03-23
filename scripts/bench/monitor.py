@@ -1,16 +1,37 @@
 """GPU/CPU/RAM monitor — runs in a background thread during tests.
 
-Uses sysfs for GPU metrics (energy, frequency, temp) since intel_gpu_top
-crashes with multi-GPU DG2 on v1.28. CPU from /proc/stat, RAM from /proc/meminfo.
+Uses sysfs for GPU metrics (energy, frequency, temp) and xpu-smi for VRAM.
+CPU from /proc/stat, RAM from /proc/meminfo.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def gpu_vram_mib() -> list[float]:
+    """Get per-GPU VRAM usage in MiB via xpu-smi. Returns [] if unavailable."""
+    try:
+        r = subprocess.run(
+            ["xpu-smi", "dump", "-d", "0,1,2", "-m", "18", "-n", "1"],
+            capture_output=True, text=True, timeout=5,
+        )
+        vram = []
+        for line in r.stdout.strip().splitlines():
+            if line.startswith("Timestamp") or not line.strip():
+                continue
+            parts = line.split(",")
+            if len(parts) >= 2:
+                val = parts[-1].strip()
+                vram.append(float(val) if val != "N/A" else 0.0)
+        return vram
+    except Exception:
+        return []
 
 
 @dataclass
@@ -19,6 +40,7 @@ class Utilization:
     gpu_freq_mhz: list[float]   # per-GPU average frequency
     gpu_power_w: list[float]    # per-GPU average power draw (watts)
     gpu_temp_c: list[float]     # per-GPU average temp (celsius)
+    gpu_vram_mib: list[float]   # per-GPU VRAM used (MiB) — snapshot, not averaged
     cpu: float                  # overall CPU %
     ram_gb: float               # used RAM in GB
     samples: int
@@ -26,7 +48,8 @@ class Utilization:
     def summary(self) -> str:
         parts = []
         for i, (f, w, t) in enumerate(zip(self.gpu_freq_mhz, self.gpu_power_w, self.gpu_temp_c)):
-            parts.append(f"GPU{i}:{f:.0f}MHz/{w:.0f}W/{t:.0f}°C")
+            vram = f"/{self.gpu_vram_mib[i]:.0f}M" if i < len(self.gpu_vram_mib) else ""
+            parts.append(f"GPU{i}:{f:.0f}MHz/{w:.0f}W/{t:.0f}°C{vram}")
         parts.append(f"CPU:{self.cpu:.0f}%")
         parts.append(f"RAM:{self.ram_gb:.1f}G")
         return " ".join(parts)
@@ -34,7 +57,7 @@ class Utilization:
     @staticmethod
     def empty() -> Utilization:
         return Utilization(gpu_freq_mhz=[], gpu_power_w=[], gpu_temp_c=[],
-                           cpu=0, ram_gb=0, samples=0)
+                           gpu_vram_mib=[], cpu=0, ram_gb=0, samples=0)
 
 
 def _find_gpu_cards() -> list[dict]:
@@ -170,10 +193,14 @@ class Monitor:
             power_avgs.append(round(sum(s.get(f"gpu{i}_power", 0) for s in filtered) / n, 1))
             temp_avgs.append(round(sum(s.get(f"gpu{i}_temp", 0) for s in filtered) / n, 1))
 
+        # VRAM is a point-in-time snapshot (not averaged over samples)
+        vram = gpu_vram_mib()
+
         return Utilization(
             gpu_freq_mhz=freq_avgs,
             gpu_power_w=power_avgs,
             gpu_temp_c=temp_avgs,
+            gpu_vram_mib=vram,
             cpu=round(sum(s["cpu"] for s in filtered) / n, 1),
             ram_gb=round(sum(s["ram_gb"] for s in filtered) / n, 1),
             samples=n,

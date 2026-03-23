@@ -123,11 +123,33 @@ Dense TP works perfectly on the eptp build (20.7 t/s). MoE EP garbles. Systemati
 
 **Status:** Needs clean rebase, then fix fused aggregation kernel for sparse EP slots.
 
-### 3. Qwen3.5 35B MoE — New Architecture
+### 3. Qwen3.5 35B MoE — WORKS on Fresh Master (Single GPU)
 
-**Worktree:** `llama.cpp-qwen35` (branch: `qwen35-support`)
+**Model:** `Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf`
+- 19.71 GiB, 256 experts, 8 active/token, Gated Delta Net attention
+- **Works on `llama.cpp-master` (fresh clone of upstream) with single GPU (`np=1`)**
 
-Architecture: `qwen35moe` — 256 experts, Gated Delta Net attention. Two models tested (`HauhauCS-Aggressive`, `heretic-v2`), both garble at np=1 on clean build from stable-baseline. Upstream SYCL issue with Gated Delta Net, not our code. Separate workstream.
+**Working config:**
+- `-fit off` required for model loading
+- `-np 1` (single GPU) — multi-GPU crashes during init
+- ~7 t/s generation
+
+**Status (2026-03-21):** Single GPU works. Multi-GPU needs expert padding (256 ÷ 3) + TP logic from stable build ported over.
+
+**Gated Delta Net kernel:** CONFIRMED WORKING on master:
+```
+sched_reserve: fused Gated Delta Net (autoregressive) enabled
+sched_reserve: fused Gated Delta Net (chunked) enabled
+```
+
+**Build instructions:**
+```bash
+cd /home/ryan/llm-stack/llama.cpp-master
+source ../env.sglang-xpu.sh
+mkdir -p build-sycl && cd build-sycl
+cmake .. -DGGML_SYCL=ON -DGGML_SYCL_FAT=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx
+cmake --build . --target llama-server -j$(nproc)
+```
 
 ## Big Unlocks (What Could Fix Things)
 
@@ -174,4 +196,4 @@ Architecture: `qwen35moe` — 256 experts, Gated Delta Net attention. Two models
 | Q8_0 quant | ~3.3 t/s, bandwidth-bound, not worth optimizing |
 | `llama.cpp-tp` worktree | Deleted March 20. Branch `tensor-parallelism-upstream` preserved in git. TP work lives in `llama.cpp-eptp` now. |
 | `llama.cpp-expert` worktree | Deleted March 20. Branch preserved in git. |
-| Qwen3.5 35B MoE on current build | Gated Delta Net attention garbles, upstream SYCL issue |
+| Qwen3.5 35B MoE on stable build | Gated Delta Net garbles on stable — use master (single GPU works) |

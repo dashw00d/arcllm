@@ -11,6 +11,10 @@ MODELS = {
     "9b-q8": ROOT / "models/Qwen/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q8_0.gguf",
     "qwen30b-ablit-q4km": ROOT
     / "models/Qwen/Qwen3-30B-A3B-abliterated-GGUF/qwen3-30b-a3b-abliterated-q4_k_m.gguf",
+    "qwen35-35b-unsloth": ROOT
+    / "models/Qwen/Qwen3.5-35B-A3B-unsloth-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf",
+    "qwen35-35b-hauhau": ROOT
+    / "models/Qwen/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-GGUF/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
 }
 
 DEFAULT_PROMPT = (

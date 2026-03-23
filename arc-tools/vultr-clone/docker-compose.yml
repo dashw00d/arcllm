@@ -1,0 +1,18 @@
+# Local Vultr worker clone — runs grabber worker identically to cloud instances
+# but routes all traffic through host IP (SPOOF_IPV6=true).
+#
+# Usage:
+#   docker compose build
+#   docker compose up        (foreground, see logs)
+#   docker compose up -d     (background)
+#
+# Requires: arc-tools stack running (db, redis, temporal on host ports)
+
+services:
+  vultr-clone:
+    build:
+      context: ..
+      dockerfile: vultr-clone/Dockerfile
+    network_mode: "host"
+    env_file: worker.env
+    restart: unless-stopped
