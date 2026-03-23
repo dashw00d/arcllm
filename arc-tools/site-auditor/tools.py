@@ -84,27 +84,72 @@ def browser_close() -> str:
 
 # ── Markdown fetcher (Stage 1 triage — no browser needed) ────────────────
 
+def _html_to_text(html_text: str) -> str:
+    """Convert HTML to plain text using stdlib only (no beautifulsoup)."""
+    import re, html as html_module
+    # Remove scripts, styles, SVGs
+    text = re.sub(r"(?is)<script[^>]*>.*?</script>", "", html_text)
+    text = re.sub(r"(?is)<style[^>]*>.*?</style>", "", text)
+    text = re.sub(r"(?is)<svg[^>]*>.*?</svg>", "", text)
+    # Decode HTML entities
+    text = html_module.unescape(text)
+    # Split on block-level tags to preserve paragraph breaks
+    parts = re.split(r"(?i)</?(?:p|div|h[1-6]|br|li|tr|blockquote|pre|ul|ol|table|hr)[^>]*>", text)
+    lines = [p.strip() for p in parts if p.strip()]
+    # Remove remaining tags
+    lines = [re.sub(r"<[^>]+>", "", line).strip() for line in lines]
+    text = "\n".join(lines)
+    # Collapse whitespace
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 async def get_markdown(url: str) -> str:
-    """Fetch a page as clean markdown via Jina Reader. Falls back to raw text."""
-    jina_url = f"https://r.jina.ai/{url}"
+    """Fetch a page as clean markdown via local browser extraction.
+
+    Strategy (in order):
+    1. Browser + local HTML→text (most reliable for JS-heavy sites)
+    2. Raw HTML fetch + local HTML→text (static sites)
+    3. Jina Reader (last resort fallback)
+    """
+    # Method 1: Browser extraction
     try:
+        opened = browser_open(url)
+        if opened and not opened.startswith("ERROR"):
+            html_content = browser_get_html("body")
+            if html_content and len(html_content) > 100 and not html_content.startswith("ERROR"):
+                text = _html_to_text(html_content)
+                if text:
+                    logger.info("Browser extraction got %d chars for %s", len(text), url)
+                    return text[:4000]
+    except Exception as e:
+        logger.warning("Browser extraction failed for %s: %s", url, e)
+
+    # Method 2: Raw HTML + local strip
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                text = _html_to_text(resp.text)
+                if text and len(text) > 100:
+                    logger.info("Raw HTML extraction got %d chars for %s", len(text), url)
+                    return text[:4000]
+    except Exception as e:
+        logger.warning("Raw HTML fetch failed for %s: %s", url, e)
+
+    # Method 3: Jina Reader (last resort)
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             resp = await client.get(jina_url, headers={"Accept": "text/markdown"})
             if resp.status_code == 200 and len(resp.text) > 100:
-                return resp.text[:4000]  # ~1000 tokens — thinking disabled, all budget for content
+                logger.info("Jina fallback got %d chars for %s", len(resp.text), url)
+                return resp.text[:4000]
     except Exception as e:
         logger.warning("Jina Reader failed for %s: %s", url, e)
 
-    # Fallback: fetch raw HTML and strip tags
-    try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-            resp = await client.get(url)
-            import re
-            text = re.sub(r'<[^>]+>', ' ', resp.text)
-            text = re.sub(r'\s+', ' ', text).strip()
-            return text[:4000]
-    except Exception as e:
-        return f"ERROR: could not fetch {url}: {e}"
+    return f"ERROR: could not fetch {url}"
 
 
 # ── Skeletonize JS (Stage 3 patterning) ─────────────────────────────────
