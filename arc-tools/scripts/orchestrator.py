@@ -187,7 +187,7 @@ async def trigger_pattern_grab(mission_id: str, entity_type: str | None) -> int:
         )
         return 1
     except Exception as e:
-        log.error("Failed to start PatternGrabWorkflow: %s", e)
+        log.error("Failed to start PatternGrabWorkflow (entity_type=%s, mission=%s): %s", entity_type, mission_id, e)
         return 0
 
 

@@ -82,20 +82,24 @@ class PatternGrabWorkflow:
             )
 
             try:
-                # Extract selectors from dom_patterns (for link extraction on index pages)
-                index_selectors: dict | None = None
+                # Collect ALL index selector sets from ALL dom_patterns where page_type='index'
+                index_selector_sets: list[dict] = []
                 for dp in audit.dom_patterns:
                     if dp.get("page_type") == "index" and dp.get("entity_selector"):
-                        index_selectors = {
+                        index_selector_sets.append({
                             "entity_selector": dp.get("entity_selector", ""),
                             "link_selector": dp.get("link_selector", ""),
-                        }
-                        break  # use first index-pattern with selectors
+                        })
+
+                workflow.logger.info(
+                    "Audit %s: collected %d index selector sets",
+                    audit_id, len(index_selector_sets),
+                )
 
                 # Step 2: expand_urls — discover detail page URLs
                 expand_result: ExpandResult = await workflow.execute_activity(
                     expand_urls,
-                    args=[audit_id, audit.domain, audit.url_patterns, index_selectors],
+                    args=[audit_id, audit.domain, audit.url_patterns, index_selector_sets],
                     start_to_close_timeout=timedelta(minutes=15),
                     retry_policy=RETRY_SCRAPE,
                     task_queue="grabber",

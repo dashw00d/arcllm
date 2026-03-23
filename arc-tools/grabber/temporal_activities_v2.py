@@ -266,14 +266,18 @@ async def _fetch_and_extract_links(
 
 @activity.defn
 async def expand_urls(audit_id: str, domain: str, url_patterns: list[dict],
-                      index_selectors: dict | None = None) -> ExpandResult:
+                      index_selector_sets: list[dict] | None = None) -> ExpandResult:
     """
     For each url_pattern in audit's url_patterns:
     - Expand pagination patterns
     - Fetch index pages
-    - Extract detail page URLs via entity_selector + link_selector from dom_patterns
+    - Extract detail page URLs via entity_selector + link_selector from ALL dom_patterns
+      where page_type='index'. Each selector set is tried against each page; results are unioned.
     """
-    activity.logger.info("Expanding URLs for audit %s (domain=%s)", audit_id, domain)
+    activity.logger.info(
+        "Expanding URLs for audit %s (domain=%s, selector_sets=%d)",
+        audit_id, domain, len(index_selector_sets) if index_selector_sets else 0,
+    )
 
     # Build a session — use simple curl_cffi directly to avoid Redis dependency
     from curl_cffi.requests import AsyncSession
@@ -309,23 +313,39 @@ async def expand_urls(audit_id: str, domain: str, url_patterns: list[dict],
         await asyncio.sleep(_rate_limit(domain, last_request_time))
         last_request_time[domain] = time.monotonic()
 
-        # Fetch first page to get entity+link selectors
-        first_urls = urls_to_fetch[:3]  # sample a few pages
+        # Sample a few pages
+        sample_urls = urls_to_fetch[:3]
 
-        for page_url in first_urls:
+        for page_url in sample_urls:
             activity.heartbeat()
-            # Use index_selectors from dom_patterns if available; fall back to pagination_selector
-            entity_sel = (index_selectors["entity_selector"] if index_selectors else None)
-            link_sel = (index_selectors["link_selector"] if index_selectors else pagination_selector)
-            links, err = await _fetch_and_extract_links(
-                session, page_url,
-                entity_selector=entity_sel,
-                link_selector=link_sel,
-            )
-            if err:
-                errors.append(f"{page_url}: {err}")
-                continue
-            all_detail_urls.extend(links)
+            # Try each selector set from each index dom_pattern; union the results
+            page_links = []
+            if index_selector_sets:
+                for sel_set in index_selector_sets:
+                    entity_sel = sel_set.get("entity_selector")
+                    link_sel = sel_set.get("link_selector")
+                    links, err = await _fetch_and_extract_links(
+                        session, page_url,
+                        entity_selector=entity_sel,
+                        link_selector=link_sel,
+                    )
+                    if err:
+                        errors.append(f"{page_url} [{entity_sel}]: {err}")
+                        continue
+                    page_links.extend(links)
+            elif pagination_selector:
+                # Fall back to pagination_selector if no index selectors
+                links, err = await _fetch_and_extract_links(
+                    session, page_url,
+                    entity_selector=None,
+                    link_selector=pagination_selector,
+                )
+                if err:
+                    errors.append(f"{page_url}: {err}")
+                    continue
+                page_links.extend(links)
+
+            all_detail_urls.extend(page_links)
 
     await session.close()
 
