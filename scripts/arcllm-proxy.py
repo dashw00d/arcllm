@@ -34,7 +34,7 @@ LOG_FILE = os.environ.get("ARCLLM_LOGFILE", "/tmp/arcllm-server.log")
 # SYCL env (set before spawning llama-server)
 SYCL_ENV = {
     "GGML_SYCL_DISABLE_GRAPH": "1",
-    "SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS": "0",
+    "SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS": "2",
     "ZE_AFFINITY_MASK": "0,1,2",
     "GGML_SYCL_FUSED_MMQ": "1",
 }
@@ -480,13 +480,13 @@ class BackendManager:
         # Delete corrupted slot cache
         self._clear_slot_cache(model_name)
 
-        # GPU driver rebind
-        self._hw_reset_gpus()
-        time.sleep(3)
-        self._driver_rebind_gpus()
+        # NOTE: driver rebind and PCI nuke removed from auto-recovery.
+        # They caused GPU loss requiring reboot. If canary fails after cache
+        # flush, the proxy will retry loading on the next request.
+        # Manual recovery: arcllm-server.sh gpu-reset (or reboot)
 
         self._compiler_cache_healthy = False
-        log.error("Recovery complete — will recompile JIT on next startup (~90s)")
+        log.error("Recovery: flushed caches + cleared slots. Next load will JIT recompile (~90s)")
 
     @staticmethod
     def _hw_reset_gpus():

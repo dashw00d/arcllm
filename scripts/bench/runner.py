@@ -80,8 +80,15 @@ class BenchRunner:
 
     @staticmethod
     def _kill_gpu_consumers():
-        """Kill ALL processes that might hold GPU state."""
-        for pat in ["llama-server", "llama-cli", "llama-bench", "arcllm-proxy"]:
+        """Kill bench-launched GPU processes. Does NOT touch the proxy or
+        proxy-launched servers (port 18400) — only bench servers on port 8400."""
+        # Only kill llama-server on the bench port, not the proxy's backend
+        subprocess.run(
+            ["pkill", "-9", "-f", "llama-server.*--port 8400"],
+            capture_output=True,
+        )
+        # Kill bench utilities but NEVER the proxy
+        for pat in ["llama-cli", "llama-bench"]:
             subprocess.run(["pkill", "-9", "-f", pat],
                            capture_output=True)
 
@@ -126,15 +133,8 @@ class BenchRunner:
         for addr in GPU_PCI_ADDRS:
             BenchRunner._sudo_write(str(i915_path / "bind"), addr)
 
-    @staticmethod
-    def _pci_nuke_gpus():
-        """PCI remove + rescan — nuclear option when rebind fails."""
-        print("  PCI remove+rescan (nuclear recovery)...")
-        for addr in GPU_PCI_ADDRS:
-            BenchRunner._sudo_write(f"/sys/bus/pci/devices/{addr}/remove", "1")
-        time.sleep(3)
-        BenchRunner._sudo_write("/sys/bus/pci/rescan", "1")
-        time.sleep(10)
+    # PCI nuke REMOVED from bench runner — caused GPU loss requiring reboot.
+    # Use arcllm-server.sh gpu-nuke manually if needed (and only as last resort).
 
     # Persistent JIT cache — survives DEVICE_LOST crash + GPU reset.
     _JIT_CACHE_BACKUP = Path("/home/ryan/llm-stack/cache/neo_compiler_cache")
@@ -227,21 +227,10 @@ class BenchRunner:
             print(f"  GPUs not ready, waiting ({attempt + 1}/3)...")
             time.sleep(10)
 
-        # 5. Fallback: unbind/rebind i915 driver to force L0 rediscovery.
-        print("  sysfs reset insufficient, trying i915 driver rebind...")
-        self._driver_rebind_gpus()
-        time.sleep(5)
-        for attempt in range(3):
-            if self.check_gpus():
-                self._report_vram()
-                return True
-            time.sleep(5)
-
-        # 6. PCI nuke is too risky for automatic recovery — can lose a GPU
-        # that only comes back on reboot. Left as manual-only:
-        #   arcllm-server.sh gpu-nuke
-        print("  WARNING: GPUs not responding after reset + rebind")
-        print("  Try manually: arcllm-server.sh gpu-nuke (or reboot)")
+        # Driver rebind and PCI nuke are NOT automated — they can lose GPUs.
+        # If sysfs reset fails, stop and tell the user to fix manually.
+        print("  WARNING: GPUs not responding after sysfs reset")
+        print("  Try: arcllm-server.sh gpu-reset (or reboot)")
         return False
 
     # ── Server lifecycle ──────────────────────────────────────────────
